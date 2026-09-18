@@ -22,16 +22,17 @@
 
 typedef std::vector<unsigned char> valtype;
 
-MutableTransactionSignatureCreator::MutableTransactionSignatureCreator(const CMutableTransaction& tx, unsigned int input_idx, const CAmount& amount, int hash_type)
-    : m_txto{tx}, nIn{input_idx}, nHashType{hash_type}, amount{amount}, checker{&m_txto, nIn, amount, MissingDataBehavior::FAIL},
+MutableTransactionSignatureCreator::MutableTransactionSignatureCreator(const CMutableTransaction& tx, unsigned int input_idx, const CAmount& amount, int hash_type, uint32_t fork_id)
+    : m_txto{tx}, nIn{input_idx}, nHashType{hash_type}, amount{amount}, m_fork_id{fork_id},
+      checker{&m_txto, nIn, amount, MissingDataBehavior::FAIL, fork_id},
       m_txdata(nullptr)
 {
 }
 
-MutableTransactionSignatureCreator::MutableTransactionSignatureCreator(const CMutableTransaction& tx, unsigned int input_idx, const CAmount& amount, const PrecomputedTransactionData* txdata, int hash_type)
-    : m_txto{tx}, nIn{input_idx}, nHashType{hash_type}, amount{amount},
-      checker{txdata ? MutableTransactionSignatureChecker{&m_txto, nIn, amount, *txdata, MissingDataBehavior::FAIL} :
-                       MutableTransactionSignatureChecker{&m_txto, nIn, amount, MissingDataBehavior::FAIL}},
+MutableTransactionSignatureCreator::MutableTransactionSignatureCreator(const CMutableTransaction& tx, unsigned int input_idx, const CAmount& amount, const PrecomputedTransactionData* txdata, int hash_type, uint32_t fork_id)
+    : m_txto{tx}, nIn{input_idx}, nHashType{hash_type}, amount{amount}, m_fork_id{fork_id},
+      checker{txdata ? MutableTransactionSignatureChecker{&m_txto, nIn, amount, *txdata, MissingDataBehavior::FAIL, fork_id} :
+                       MutableTransactionSignatureChecker{&m_txto, nIn, amount, MissingDataBehavior::FAIL, fork_id}},
       m_txdata(txdata)
 {
 }
@@ -54,7 +55,7 @@ bool MutableTransactionSignatureCreator::CreateSig(const SigningProvider& provid
     // BASE/WITNESS_V0 signatures don't support explicit SIGHASH_DEFAULT, use SIGHASH_ALL instead.
     const int hashtype = nHashType == SIGHASH_DEFAULT ? SIGHASH_ALL : nHashType;
 
-    uint256 hash = SignatureHash(scriptCode, m_txto, nIn, hashtype, amount, sigversion, m_txdata);
+    uint256 hash = SignatureHash(scriptCode, m_txto, nIn, hashtype, amount, sigversion, m_txdata, /*sighash_cache=*/nullptr, m_fork_id);
     if (!key.Sign(hash, vchSig))
         return false;
     vchSig.push_back((unsigned char)hashtype);
@@ -1006,7 +1007,7 @@ bool IsSegWitOutput(const SigningProvider& provider, const CScript& script)
     return false;
 }
 
-bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, const std::map<COutPoint, Coin>& coins, int nHashType, std::map<int, bilingual_str>& input_errors)
+bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, const std::map<COutPoint, Coin>& coins, int nHashType, std::map<int, bilingual_str>& input_errors, uint32_t fork_id)
 {
     bool fHashSingle = ((nHashType & ~SIGHASH_ANYONECANPAY) == SIGHASH_SINGLE);
 
@@ -1044,7 +1045,7 @@ bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, 
         SignatureData sigdata = DataFromTransaction(mtx, i, coin->second.out);
         // Only sign SIGHASH_SINGLE if there's a corresponding output:
         if (!fHashSingle || (i < mtx.vout.size())) {
-            ProduceSignature(*keystore, MutableTransactionSignatureCreator(mtx, i, amount, &txdata, nHashType), prevPubKey, sigdata);
+            ProduceSignature(*keystore, MutableTransactionSignatureCreator(mtx, i, amount, &txdata, nHashType, fork_id), prevPubKey, sigdata);
         }
 
         UpdateInput(txin, sigdata);

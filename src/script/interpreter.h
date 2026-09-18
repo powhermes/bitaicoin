@@ -268,8 +268,30 @@ public:
     void Store(int32_t hash_type, const CScript& script_code, const HashWriter& writer) noexcept;
 };
 
+/**
+ * BitAIcoin replay protection: fold a chain-specific fork ID into a legacy or
+ * BIP143 sighash type before the final hash, so a signature produced for one
+ * chain is unconditionally invalid on the other for the same tx/inputs/
+ * outputs/keys. fork_id == 0 (every chain except BitAIcoin post-activation)
+ * is a strict no-op -- returns nHashType unchanged.
+ *
+ * Collision-free by construction, not by hash-collision luck: every real
+ * Bitcoin signature's serialized hash type is a single byte (vchSig.back()),
+ * so bits 8-31 of nHashType are always zero on every existing signature.
+ * OR-ing any nonzero fork_id into those bits therefore makes a BitAIcoin
+ * sighash preimage's final 4 bytes differ from every possible plain-Bitcoin
+ * preimage's, for every legacy/BIP143 hash type value, unconditionally by
+ * height -- not via a flag bit inside the signature that could be stripped
+ * to downgrade. See docs/REPLAY_PROTECTION.md.
+ */
+constexpr int32_t ApplyForkId(int32_t nHashType, uint32_t fork_id)
+{
+    if (fork_id == 0) return nHashType;
+    return static_cast<int32_t>((static_cast<uint32_t>(nHashType) & 0xff) | (fork_id << 8));
+}
+
 template <class T>
-uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn, int32_t nHashType, const CAmount& amount, SigVersion sigversion, const PrecomputedTransactionData* cache = nullptr, SigHashCache* sighash_cache = nullptr);
+uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn, int32_t nHashType, const CAmount& amount, SigVersion sigversion, const PrecomputedTransactionData* cache = nullptr, SigHashCache* sighash_cache = nullptr, uint32_t fork_id = 0);
 
 class BaseSignatureChecker
 {
@@ -319,14 +341,15 @@ private:
     const CAmount amount;
     const PrecomputedTransactionData* txdata;
     mutable SigHashCache m_sighash_cache;
+    const uint32_t m_fork_id;
 
 protected:
     virtual bool VerifyECDSASignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
     virtual bool VerifySchnorrSignature(std::span<const unsigned char> sig, const XOnlyPubKey& pubkey, const uint256& sighash) const;
 
 public:
-    GenericTransactionSignatureChecker(const T* txToIn, unsigned int nInIn, const CAmount& amountIn, MissingDataBehavior mdb) : txTo(txToIn), m_mdb(mdb), nIn(nInIn), amount(amountIn), txdata(nullptr) {}
-    GenericTransactionSignatureChecker(const T* txToIn, unsigned int nInIn, const CAmount& amountIn, const PrecomputedTransactionData& txdataIn, MissingDataBehavior mdb) : txTo(txToIn), m_mdb(mdb), nIn(nInIn), amount(amountIn), txdata(&txdataIn) {}
+    GenericTransactionSignatureChecker(const T* txToIn, unsigned int nInIn, const CAmount& amountIn, MissingDataBehavior mdb, uint32_t fork_id = 0) : txTo(txToIn), m_mdb(mdb), nIn(nInIn), amount(amountIn), txdata(nullptr), m_fork_id(fork_id) {}
+    GenericTransactionSignatureChecker(const T* txToIn, unsigned int nInIn, const CAmount& amountIn, const PrecomputedTransactionData& txdataIn, MissingDataBehavior mdb, uint32_t fork_id = 0) : txTo(txToIn), m_mdb(mdb), nIn(nInIn), amount(amountIn), txdata(&txdataIn), m_fork_id(fork_id) {}
     bool CheckECDSASignature(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const override;
     bool CheckSchnorrSignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
     bool CheckLockTime(const CScriptNum& nLockTime) const override;

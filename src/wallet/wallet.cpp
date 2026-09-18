@@ -9,6 +9,7 @@
 #include <addresstype.h>
 #include <blockfilter.h>
 #include <chain.h>
+#include <chainparams.h>
 #include <coins.h>
 #include <common/args.h>
 #include <common/messages.h>
@@ -2170,11 +2171,19 @@ bool CWallet::SignTransaction(CMutableTransaction& tx) const
 
 bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors) const
 {
+    // BitAIcoin replay protection: resolve fork_id from the height the
+    // transaction would actually confirm at (current tip + 1), not the
+    // wallet's node identity -- every non-BitAIcoin chain leaves
+    // BitAIActivationHeight at INT_MAX so this is always 0 there.
+    const Consensus::Params& consensusParams = Params().GetConsensus();
+    const int nHeight = WITH_LOCK(cs_wallet, return GetLastBlockHeight()) + 1;
+    const uint32_t fork_id = (nHeight >= consensusParams.BitAIActivationHeight) ? consensusParams.BitAIForkId : 0;
+
     // Try to sign with all ScriptPubKeyMans
     for (ScriptPubKeyMan* spk_man : GetAllScriptPubKeyMans()) {
         // spk_man->SignTransaction will return true if the transaction is complete,
         // so we can exit early and return true if that happens
-        if (spk_man->SignTransaction(tx, coins, sighash, input_errors)) {
+        if (spk_man->SignTransaction(tx, coins, sighash, input_errors, fork_id)) {
             return true;
         }
     }

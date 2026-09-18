@@ -769,7 +769,14 @@ static RPCHelpMan signrawtransactionwithkey()
     ParsePrevouts(request.params[2], &keystore, coins);
 
     UniValue result(UniValue::VOBJ);
-    SignTransaction(mtx, &keystore, coins, request.params[3], result);
+    // BitAIcoin replay protection: resolve fork_id from the height this
+    // transaction would confirm at (current tip + 1). Every non-BitAIcoin
+    // chain leaves BitAIActivationHeight at INT_MAX, so this is always 0.
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    const Consensus::Params& consensusParams = chainman.GetConsensus();
+    const int nHeight = WITH_LOCK(chainman.GetMutex(), return chainman.ActiveHeight()) + 1;
+    const uint32_t fork_id = (nHeight >= consensusParams.BitAIActivationHeight) ? consensusParams.BitAIForkId : 0;
+    SignTransaction(mtx, &keystore, coins, request.params[3], result, fork_id);
     return result;
 },
     };

@@ -1597,7 +1597,7 @@ void SigHashCache::Store(int32_t hash_type, const CScript& script_code, const Ha
 }
 
 template <class T>
-uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn, int32_t nHashType, const CAmount& amount, SigVersion sigversion, const PrecomputedTransactionData* cache, SigHashCache* sighash_cache)
+uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn, int32_t nHashType, const CAmount& amount, SigVersion sigversion, const PrecomputedTransactionData* cache, SigHashCache* sighash_cache, uint32_t fork_id)
 {
     assert(nIn < txTo.vin.size());
 
@@ -1615,8 +1615,9 @@ uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn
 
     // Try to compute using cached SHA256 midstate.
     if (sighash_cache && sighash_cache->Load(nHashType, scriptCode, ss)) {
-        // Add sighash type and hash.
-        ss << nHashType;
+        // Add sighash type (BitAIcoin fork-ID folded in above the raw byte range,
+        // see ApplyForkId) and hash.
+        ss << ApplyForkId(nHashType, fork_id);
         return ss.GetHash();
     }
 
@@ -1666,13 +1667,17 @@ uint256 SignatureHash(const CScript& scriptCode, const T& txTo, unsigned int nIn
         ss << txTmp;
     }
 
-    // If a cache object was provided, store the midstate there.
+    // If a cache object was provided, store the midstate there. Keyed on the
+    // raw (pre-fork-id) hash type -- correct even under a nonzero fork_id,
+    // since fork_id is constant for the lifetime of one checker/cache
+    // instance and is only mixed in fresh at the serialization point below.
     if (sighash_cache != nullptr) {
         sighash_cache->Store(nHashType, scriptCode, ss);
     }
 
-    // Add sighash type and hash.
-    ss << nHashType;
+    // Add sighash type (BitAIcoin fork-ID folded in above the raw byte range,
+    // see ApplyForkId) and hash.
+    ss << ApplyForkId(nHashType, fork_id);
     return ss.GetHash();
 }
 
@@ -1705,7 +1710,7 @@ bool GenericTransactionSignatureChecker<T>::CheckECDSASignature(const std::vecto
     // Witness sighashes need the amount.
     if (sigversion == SigVersion::WITNESS_V0 && amount < 0) return HandleMissingData(m_mdb);
 
-    uint256 sighash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, sigversion, this->txdata, &m_sighash_cache);
+    uint256 sighash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, sigversion, this->txdata, &m_sighash_cache, m_fork_id);
 
     if (!VerifyECDSASignature(vchSig, pubkey, sighash))
         return false;

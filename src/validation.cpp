@@ -145,8 +145,9 @@ const CBlockIndex* Chainstate::FindForkInGlobalIndex(const CBlockLocator& locato
 }
 
 bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
-                       const CCoinsViewCache& inputs, script_verify_flags flags, bool cacheSigStore,
-                       bool cacheFullScriptStore, PrecomputedTransactionData& txdata,
+                       const CCoinsViewCache& inputs, script_verify_flags flags,
+                       int nHeight, const Consensus::Params& consensusParams,
+                       bool cacheSigStore, bool cacheFullScriptStore, PrecomputedTransactionData& txdata,
                        ValidationCache& validation_cache,
                        std::vector<CScriptCheck>* pvChecks = nullptr)
                        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -401,7 +402,8 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 * */
 static bool CheckInputsFromMempoolAndCache(const CTransaction& tx, TxValidationState& state,
                 const CCoinsViewCache& view, const CTxMemPool& pool,
-                script_verify_flags flags, PrecomputedTransactionData& txdata, CCoinsViewCache& coins_tip,
+                script_verify_flags flags, int nHeight, const Consensus::Params& consensusParams,
+                PrecomputedTransactionData& txdata, CCoinsViewCache& coins_tip,
                 ValidationCache& validation_cache)
                 EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs)
 {
@@ -434,7 +436,7 @@ static bool CheckInputsFromMempoolAndCache(const CTransaction& tx, TxValidationS
     }
 
     // Call CheckInputScripts() to cache signature and script validity against current tip consensus rules.
-    return CheckInputScripts(tx, state, view, flags, /* cacheSigStore= */ true, /* cacheFullScriptStore= */ true, txdata, validation_cache);
+    return CheckInputScripts(tx, state, view, flags, nHeight, consensusParams, /* cacheSigStore= */ true, /* cacheFullScriptStore= */ true, txdata, validation_cache);
 }
 
 namespace {
@@ -1144,10 +1146,11 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
     TxValidationState& state = ws.m_state;
 
     constexpr script_verify_flags scriptVerifyFlags = STANDARD_SCRIPT_VERIFY_FLAGS;
+    const int nHeight{m_active_chainstate.m_chain.Height() + 1};
 
     // Check input scripts and signatures.
     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
-    if (!CheckInputScripts(tx, state, m_view, scriptVerifyFlags, true, false, ws.m_precomputed_txdata, GetValidationCache())) {
+    if (!CheckInputScripts(tx, state, m_view, scriptVerifyFlags, nHeight, m_active_chainstate.m_chainman.GetConsensus(), true, false, ws.m_precomputed_txdata, GetValidationCache())) {
         // Detect a failure due to a missing witness so that p2p code can handle rejection caching appropriately.
         if (!tx.HasWitness() && SpendsNonAnchorWitnessProg(tx, m_view)) {
             state.Invalid(TxValidationResult::TX_WITNESS_STRIPPED,
@@ -1183,7 +1186,9 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
     // invalid blocks (using TestBlockValidity), however allowing such
     // transactions into the mempool can be exploited as a DoS attack.
     script_verify_flags currentBlockScriptVerifyFlags{GetBlockScriptFlags(*m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman)};
+    const int nHeight{m_active_chainstate.m_chain.Height() + 1};
     if (!CheckInputsFromMempoolAndCache(tx, state, m_view, m_pool, currentBlockScriptVerifyFlags,
+                                        nHeight, m_active_chainstate.m_chainman.GetConsensus(),
                                         ws.m_precomputed_txdata, m_active_chainstate.CoinsTip(), GetValidationCache())) {
         LogError("BUG! PLEASE REPORT THIS! CheckInputScripts failed against latest-block but not STANDARD flags %s, %s", hash.ToString(), state.ToString());
         return Assume(false);
@@ -2019,7 +2024,7 @@ std::optional<std::pair<ScriptError, std::string>> CScriptCheck::operator()() {
     const CScript &scriptSig = ptxTo->vin[nIn].scriptSig;
     const CScriptWitness *witness = &ptxTo->vin[nIn].scriptWitness;
     ScriptError error{SCRIPT_ERR_UNKNOWN_ERROR};
-    if (VerifyScript(scriptSig, m_tx_out.scriptPubKey, witness, m_flags, CachingTransactionSignatureChecker(ptxTo, nIn, m_tx_out.nValue, cacheStore, *m_signature_cache, *txdata), &error)) {
+    if (VerifyScript(scriptSig, m_tx_out.scriptPubKey, witness, m_flags, CachingTransactionSignatureChecker(ptxTo, nIn, m_tx_out.nValue, cacheStore, *m_signature_cache, *txdata, m_fork_id), &error)) {
         return std::nullopt;
     } else {
         auto debug_str = strprintf("input %i of %s (wtxid %s), spending %s:%i", nIn, ptxTo->GetHash().ToString(), ptxTo->GetWitnessHash().ToString(), ptxTo->vin[nIn].prevout.hash.ToString(), ptxTo->vin[nIn].prevout.n);
@@ -2063,12 +2068,33 @@ ValidationCache::ValidationCache(const size_t script_execution_cache_bytes, cons
  * Non-static (and redeclared) in src/test/txvalidationcache_tests.cpp
  */
 bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
-                       const CCoinsViewCache& inputs, script_verify_flags flags, bool cacheSigStore,
-                       bool cacheFullScriptStore, PrecomputedTransactionData& txdata,
+                       const CCoinsViewCache& inputs, script_verify_flags flags,
+                       int nHeight, const Consensus::Params& consensusParams,
+                       bool cacheSigStore, bool cacheFullScriptStore, PrecomputedTransactionData& txdata,
                        ValidationCache& validation_cache,
                        std::vector<CScriptCheck>* pvChecks)
 {
     if (tx.IsCoinBase()) return true;
+
+    // BitAIcoin post-activation: Taproot-domain-separated signing is not
+    // implemented in Phase 1 (see docs/REPLAY_PROTECTION.md), so rather than
+    // leave Taproot spends silently unprotected against replay, structurally
+    // reject any transaction spending a Taproot output at or after
+    // BitAIActivationHeight -- both here (block/mempool consensus/policy
+    // checks) and via the mempool-acceptance path, so such a spend is
+    // rejected before it can be relayed or mined, not just after the fact.
+    // Every other chain leaves BitAIActivationHeight at INT_MAX, so this is
+    // unreachable/unaffected there.
+    const bool post_activation{nHeight >= consensusParams.BitAIActivationHeight};
+    if (post_activation) {
+        for (const auto& txin : tx.vin) {
+            if (inputs.AccessCoin(txin.prevout).out.scriptPubKey.IsPayToTaproot()) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bitai-taproot-spend-rejected",
+                                      "taproot-input spends are not permitted post-activation in Phase 1");
+            }
+        }
+    }
+    const uint32_t fork_id{post_activation ? consensusParams.BitAIForkId : uint32_t{0}};
 
     if (pvChecks) {
         pvChecks->reserve(tx.vin.size());
@@ -2081,7 +2107,11 @@ bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
     // transaction).
     uint256 hashCacheEntry;
     CSHA256 hasher = validation_cache.ScriptExecutionCacheHasher();
-    hasher.Write(UCharCast(tx.GetWitnessHash().begin()), 32).Write((unsigned char*)&flags, sizeof(flags)).Finalize(hashCacheEntry.begin());
+    // fork_id is folded into the cache key alongside flags: like the
+    // buried-deployment flags already here, it varies by height, and a
+    // transaction's script validity under one fork_id must never be
+    // reused as a cache hit for a different one.
+    hasher.Write(UCharCast(tx.GetWitnessHash().begin()), 32).Write((unsigned char*)&flags, sizeof(flags)).Write((unsigned char*)&fork_id, sizeof(fork_id)).Finalize(hashCacheEntry.begin());
     AssertLockHeld(cs_main); //TODO: Remove this requirement by making CuckooCache not require external locks
     if (validation_cache.m_script_execution_cache.contains(hashCacheEntry, !cacheFullScriptStore)) {
         return true;
@@ -2110,7 +2140,7 @@ bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
         // spent being checked as a part of CScriptCheck.
 
         // Verify signature
-        CScriptCheck check(txdata.m_spent_outputs[i], tx, validation_cache.m_signature_cache, i, flags, cacheSigStore, &txdata);
+        CScriptCheck check(txdata.m_spent_outputs[i], tx, validation_cache.m_signature_cache, i, flags, cacheSigStore, &txdata, fork_id);
         if (pvChecks) {
             pvChecks->emplace_back(std::move(check));
         } else if (auto result = check(); result.has_value()) {
@@ -2583,10 +2613,10 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             // they need to be added to control which runs them asynchronously. Otherwise, CheckInputScripts runs the checks before returning.
             if (control) {
                 std::vector<CScriptCheck> vChecks;
-                tx_ok = CheckInputScripts(tx, tx_state, view, flags, fCacheResults, fCacheResults, txsdata[i], m_chainman.m_validation_cache, &vChecks);
+                tx_ok = CheckInputScripts(tx, tx_state, view, flags, pindex->nHeight, m_chainman.GetConsensus(), fCacheResults, fCacheResults, txsdata[i], m_chainman.m_validation_cache, &vChecks);
                 if (tx_ok) control->Add(std::move(vChecks));
             } else {
-                tx_ok = CheckInputScripts(tx, tx_state, view, flags, fCacheResults, fCacheResults, txsdata[i], m_chainman.m_validation_cache);
+                tx_ok = CheckInputScripts(tx, tx_state, view, flags, pindex->nHeight, m_chainman.GetConsensus(), fCacheResults, fCacheResults, txsdata[i], m_chainman.m_validation_cache);
             }
             if (!tx_ok) {
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
