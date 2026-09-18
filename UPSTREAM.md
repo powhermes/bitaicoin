@@ -28,6 +28,11 @@ to never obscure that provenance.
      activation-height difficulty transition.
   4. `aa5567d` — Phase 1 M3: replay protection (fork-ID sighash domain
      separation) and Taproot-spend rejection.
+  5. `6ef4d37`, `10a1d85`, `f4d2ff8` — Phase 1 documentation suite and
+     branding assets.
+  6. `08dc5ae` — Phase 1 M5: SegWit activation at the fork point, Taproot
+     deployment lock-out, and a fix for a latent consensus bug in the
+     pre-activation difficulty-retarget clamp (see `PHASE1_REPORT.md`).
 
 Each is its own milestone-sized commit with its own verification recorded in
 its commit message — see `git log bitaicoin-phase1` for full detail, and
