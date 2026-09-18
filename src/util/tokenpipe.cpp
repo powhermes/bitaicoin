@@ -83,9 +83,26 @@ std::optional<TokenPipe> TokenPipe::Make()
 {
     int fds[2] = {-1, -1};
 #if HAVE_O_CLOEXEC && HAVE_DECL_PIPE2
+    // pipe2() is declared in this SDK but may be weak-linked and unavailable
+    // at runtime on an older deployment target (e.g. a macOS SDK that
+    // declares pipe2 for a newer OS version than is actually running) --
+    // guard with a runtime availability check rather than calling it
+    // unconditionally, which would jump through a null symbol and crash.
+#if defined(__APPLE__)
+    if (__builtin_available(macOS 27.0, *)) {
+        if (pipe2(fds, O_CLOEXEC) != 0) {
+            return std::nullopt;
+        }
+    } else {
+        if (pipe(fds) != 0) {
+            return std::nullopt;
+        }
+    }
+#else
     if (pipe2(fds, O_CLOEXEC) != 0) {
         return std::nullopt;
     }
+#endif
 #else
     if (pipe(fds) != 0) {
         return std::nullopt;
