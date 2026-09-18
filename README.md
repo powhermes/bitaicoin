@@ -1,79 +1,78 @@
-Bitcoin Core integration/staging tree
-=====================================
+BitAIcoin
+=========
 
-https://bitcoincore.org
+BitAIcoin (ticker: **BAIC**) is an independent proof-of-work altcoin,
+forked from [Bitcoin Core](https://bitcoincore.org) v31.1, built as a
+settlement-layer foundation for future autonomous AI-agent commerce
+(L402-style machine-to-machine payments). It shares real Bitcoin ledger
+history through block height 225429, then diverges onto its own
+consensus rules at height 225430.
 
-For an immediately usable, binary version of the Bitcoin Core software, see
-https://bitcoincore.org/en/download/.
+**This is Phase 1: a private "Synthetic Lab" network** — real, tested,
+running on real mining and real wallet transfers, but not publicly
+launched, seeded, or announced. See `docs/HISTORICAL_LINEAGE.md` for
+exactly what "shares real Bitcoin history" does and does not mean, and
+`PHASE1_REPORT.md` for what has actually been built and verified.
 
-What is Bitcoin Core?
----------------------
+This is a source fork of Bitcoin Core; the original upstream README is
+preserved at [README-BITCOIN-CORE.md](README-BITCOIN-CORE.md), and
+`UPSTREAM.md` records the exact tag/commit this was forked from and every
+BitAIcoin-specific commit on top of it.
 
-Bitcoin Core connects to the Bitcoin peer-to-peer network to download and fully
-validate blocks and transactions. It also includes a wallet and graphical user
-interface, which can be optionally built.
+## What makes BitAIcoin different from Bitcoin
 
-Further information about Bitcoin Core is available in the [doc folder](/doc).
+| | |
+|---|---|
+| Shared history | Genesis through height 225429 — byte-identical to real Bitcoin mainnet |
+| Diverges at | Height 225430 |
+| No premine | Coinbase schedule is Bitcoin's original 50-coin/210,000-block halving schedule, unmodified |
+| Replay protection | Consensus-level fork-ID sighash folding (legacy + BIP143); Taproot spends structurally rejected post-activation — see `docs/REPLAY_PROTECTION.md` |
+| Network identity | Own P2P magic, ports, address prefixes, bech32 HRP — see `docs/CHAIN_IDENTITY.md` |
+| Consensus deviations | Fully enumerated in `docs/CONSENSUS.md`, including open questions |
 
-License
--------
+Full design rationale: `docs/ARCHITECTURE.md`.
 
-Bitcoin Core is released under the terms of the MIT license. See [COPYING](COPYING) for more
-information or see https://opensource.org/license/MIT.
+## Documentation
 
-Development Process
--------------------
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design overview and rationale
+- [`docs/HISTORICAL_LINEAGE.md`](docs/HISTORICAL_LINEAGE.md) — exact relationship to real Bitcoin history
+- [`docs/CHAIN_IDENTITY.md`](docs/CHAIN_IDENTITY.md) — ports, magic bytes, address prefixes
+- [`docs/CONSENSUS.md`](docs/CONSENSUS.md) — every consensus rule that differs from Bitcoin, and every one that doesn't
+- [`docs/REPLAY_PROTECTION.md`](docs/REPLAY_PROTECTION.md) — fork-ID sighash design and test vectors
+- [`docs/AGENT_PAYMENTS.md`](docs/AGENT_PAYMENTS.md) — future L402 agent-payment architecture (not implemented yet)
+- [`docs/TESTNET_RUNBOOK.md`](docs/TESTNET_RUNBOOK.md) — exact steps to bootstrap history and run a private multi-node network
+- [`PHASE1_REPORT.md`](PHASE1_REPORT.md) — what was built, tested, and verified in Phase 1, and current known limitations
+- [`UPSTREAM.md`](UPSTREAM.md) — upstream repo/tag/commit and this fork's own commit history
 
-The `master` branch is regularly built (see `doc/build-*.md` for instructions) and tested, but it is not guaranteed to be
-completely stable. [Tags](https://github.com/bitcoin/bitcoin/tags) are created
-regularly from release branches to indicate new official, stable release versions of Bitcoin Core.
+## Building
 
-The https://github.com/bitcoin-core/gui repository is used exclusively for the
-development of the GUI. Its master branch is identical in all monotree
-repositories. Release branches and tags do not exist, so please do not fork
-that repository unless it is for development reasons.
+Same build system as upstream Bitcoin Core — see
+[README-BITCOIN-CORE.md](README-BITCOIN-CORE.md) and `doc/build-*.md` for
+full platform instructions. Phase 1 was built and verified with:
 
-The contribution workflow is described in [CONTRIBUTING.md](CONTRIBUTING.md)
-and useful hints for developers can be found in [doc/developer-notes.md](doc/developer-notes.md).
+```bash
+cmake -B build -DBUILD_GUI=OFF -DENABLE_IPC=OFF
+cmake --build build -j4
+ctest --test-dir build
+```
 
-Testing
--------
+## Running
 
-Testing and code review is the bottleneck for development; we get more pull
-requests than we can review and test on short notice. Please be patient and help out by testing
-other people's pull requests, and remember this is a security-critical project where any mistake might cost people
-lots of money.
+Select the BitAIcoin chain with `-chain=bitaicoin`, exactly like
+`-chain=test`/`-chain=signet`/`-chain=regtest`:
 
-### Automated Testing
+```bash
+bitcoind -chain=bitaicoin -datadir=<your datadir> ...
+bitcoin-cli -chain=bitaicoin -datadir=<your datadir> ...
+```
 
-Developers are strongly encouraged to write [unit tests](src/test/README.md) for new code, and to
-submit new unit tests for old code. Unit tests can be compiled and run
-(assuming they weren't disabled during the generation of the build system) with: `ctest`. Further details on running
-and extending unit tests can be found in [/src/test/README.md](/src/test/README.md).
+A fresh datadir has no chain data until it's seeded with real Bitcoin
+history through height 225429 — see `docs/TESTNET_RUNBOOK.md` for the
+exact bootstrap procedure (there is no shortcut; a `bitaicoin`-chain node
+cannot simply resync history from a `main`-chain datadir, since block-file
+framing and genesis validation are chain-specific from block 0).
 
-There are also [regression and integration tests](/test), written
-in Python.
-These tests can be run (if the [test dependencies](/test) are installed) with: `build/test/functional/test_runner.py`
-(assuming `build` is your build directory).
+## License
 
-The CI (Continuous Integration) systems make sure that every pull request is tested on Windows, Linux, and macOS.
-The CI must pass on all commits before merge to avoid unrelated CI failures on new pull requests.
-
-### Manual Quality Assurance (QA) Testing
-
-Changes should be tested by somebody other than the developer who wrote the
-code. This is especially important for large or high-risk changes. It is useful
-to add a test plan to the pull request description if testing the changes is
-not straightforward.
-
-Translations
-------------
-
-Changes to translations as well as new translations can be submitted to
-[Bitcoin Core's Transifex page](https://explore.transifex.com/bitcoin/bitcoin/).
-
-Translations are periodically pulled from Transifex and merged into the git repository. See the
-[translation process](doc/translation_process.md) for details on how this works.
-
-**Important**: We do not accept translation changes as GitHub pull requests because the next
-pull from Transifex would automatically overwrite them again.
+BitAIcoin is released under the same MIT license as upstream Bitcoin
+Core. See [COPYING](COPYING).
