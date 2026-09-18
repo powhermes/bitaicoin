@@ -436,6 +436,8 @@ private:
             return " regtest";
         case ChainType::MAIN:
             return "";
+        case ChainType::BITAICOIN:
+            return " bitaicoin";
         }
         assert(false);
     }

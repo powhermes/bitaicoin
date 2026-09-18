@@ -130,6 +130,34 @@ struct Params {
     uint256 defaultAssumeValid;
 
     /**
+     * BitAIcoin fork parameters (see doc/bitaicoin/CONSENSUS.md). All default to
+     * "off" (INT_MAX / zero) so every chain except BitAIcoin is provably
+     * unaffected by these fields' existence.
+     *
+     * BitAIForkAnchorHeight/Hash: the real Bitcoin mainnet block required as
+     * BitAIcoin's historical ancestor. Enforced once, in
+     * ContextualCheckBlockHeader, so no alternative history can masquerade
+     * as BitAIcoin's pre-fork past.
+     *
+     * BitAIActivationHeight: the first BitAIcoin-native block (one past the
+     * anchor). Gates the one-time easy-difficulty transition (GetNextWorkRequired)
+     * and the replay-protection / Taproot-spend-rejection rules (CheckInputScripts).
+     *
+     * BitAIActivationPowLimit: the target used for exactly the activation
+     * block itself; every block after it resumes Bitcoin's ordinary 2016-block
+     * retarget algorithm using `powLimit` as the floor.
+     *
+     * BitAIForkId: nonzero constant folded into the legacy/BIP143 sighash for
+     * every input spent at height >= BitAIActivationHeight, making BitAIcoin
+     * signatures unconditionally invalid under Bitcoin's sighash and vice versa.
+     */
+    int BitAIForkAnchorHeight{std::numeric_limits<int>::max()};
+    uint256 BitAIForkAnchorHash{};
+    int BitAIActivationHeight{std::numeric_limits<int>::max()};
+    uint256 BitAIActivationPowLimit{};
+    uint32_t BitAIForkId{0};
+
+    /**
      * If true, witness commitments contain a payload equal to a Bitcoin Script solution
      * to the signet challenge. See BIP325.
      */

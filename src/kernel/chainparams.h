@@ -159,6 +159,13 @@ public:
     static std::unique_ptr<const CChainParams> Main();
     static std::unique_ptr<const CChainParams> TestNet();
     static std::unique_ptr<const CChainParams> TestNet4();
+    /**
+     * BitAIcoin Synthetic Lab chain (Phase 1): shares real Bitcoin mainnet
+     * genesis and history through the fork-anchor height, then diverges
+     * natively. See Consensus::Params::BitAIForkAnchorHeight/Hash and
+     * BitAIActivationHeight for the exact divergence point.
+     */
+    static std::unique_ptr<const CChainParams> BitAIcoin();
 
 protected:
     CChainParams() = default;

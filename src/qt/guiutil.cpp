@@ -121,6 +121,11 @@ static std::string DummyAddress(const CChainParams &params)
     case ChainType::REGTEST:
         addr = "bcrt1p35yvjel7srp783ztf8v6jdra7dhfzk5jaun8xz2qp6ws7z80n4tqsr2427";
         break;
+    case ChainType::BITAICOIN:
+        // GUI is out of scope for BitAIcoin Phase 1 (CLI/RPC only); placeholder
+        // dummy address reused from regtest until BitAIcoin has its own bech32 HRP wired here.
+        addr = "bcrt1p35yvjel7srp783ztf8v6jdra7dhfzk5jaun8xz2qp6ws7z80n4tqsr2427";
+        break;
     } // no default case, so the compiler can warn about missing cases
     assert(!addr.empty());
 

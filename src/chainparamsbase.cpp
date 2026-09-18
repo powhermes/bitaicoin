@@ -50,6 +50,8 @@ std::unique_ptr<CBaseChainParams> CreateBaseChainParams(const ChainType chain)
         return std::make_unique<CBaseChainParams>("signet", 38332);
     case ChainType::REGTEST:
         return std::make_unique<CBaseChainParams>("regtest", 18443);
+    case ChainType::BITAICOIN:
+        return std::make_unique<CBaseChainParams>("bitaicoin", 28332);
     }
     assert(false);
 }

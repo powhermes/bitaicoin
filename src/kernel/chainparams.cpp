@@ -206,6 +206,129 @@ public:
 };
 
 /**
+ * BitAIcoin Synthetic Lab (Phase 1): shares real Bitcoin mainnet genesis and
+ * history verbatim through the fork-anchor height (BitAIForkAnchorHeight),
+ * then diverges at BitAIActivationHeight under BitAIcoin-native consensus
+ * rules (easy one-time difficulty transition, fork-ID sighash domain
+ * separation, Taproot-spend rejection). See doc/bitaicoin/CONSENSUS.md.
+ *
+ * Every buried-deployment height, powLimit, and subsidy parameter below is
+ * copied verbatim from CMainParams and left dormant (none of BIP34/65/66/
+ * CSV/Segwit/Taproot are active by height 225429 on real Bitcoin history) --
+ * this is a deliberate no-op fork below the activation height, not a
+ * reduced/simplified rule set.
+ */
+class CBitAIcoinParams : public CChainParams {
+public:
+    CBitAIcoinParams() {
+        m_chain_type = ChainType::BITAICOIN;
+        consensus.signet_blocks = false;
+        consensus.signet_challenge.clear();
+        consensus.nSubsidyHalvingInterval = 210000;
+        consensus.script_flag_exceptions.emplace( // BIP16 exception (copied from mainnet)
+            uint256{"00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22"}, SCRIPT_VERIFY_NONE);
+        consensus.script_flag_exceptions.emplace( // Taproot exception (copied from mainnet; dormant pre-activation)
+            uint256{"0000000000000000000f14c35b2d841e986ab5441de8c585d5ffe55ea1e395ad"}, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS);
+        consensus.BIP34Height = 227931;
+        consensus.BIP34Hash = uint256{"000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8"};
+        consensus.BIP65Height = 388381;
+        consensus.BIP66Height = 363725;
+        consensus.CSVHeight = 419328;
+        consensus.SegwitHeight = 481824;
+        consensus.MinBIP9WarningHeight = 483840;
+        consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+        consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+        consensus.nPowTargetSpacing = 10 * 60;
+        consensus.fPowAllowMinDifficultyBlocks = false;
+        consensus.enforce_BIP94 = false;
+        consensus.fPowNoRetargeting = false;
+
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].threshold = 1815;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].period = 2016;
+
+        // Taproot deployment: copied from mainnet, dormant pre-activation (constraint: no
+        // retroactive change to genuine historical Bitcoin consensus below the fork anchor).
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].bit = 2;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = 1619222400; // April 24th, 2021
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = 1628640000; // August 11th, 2021
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 709632;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].threshold = 1815;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].period = 2016;
+
+        // Real total chainwork/verified-signature assumptions from Bitcoin mainnet are
+        // meaningless (and dangerous to trust) for a chain whose real cumulative work will
+        // never approach mainnet's -- disabled so BitAIcoin always does real validation.
+        consensus.nMinimumChainWork = uint256{};
+        consensus.defaultAssumeValid = uint256{};
+
+        // --- BitAIcoin fork parameters ---
+        // Fork anchor: the real, independently-verified Bitcoin mainnet block required as
+        // BitAIcoin's historical ancestor (see docs/HISTORICAL_LINEAGE.md for provenance).
+        consensus.BitAIForkAnchorHeight = 225429;
+        consensus.BitAIForkAnchorHash = uint256{"0000000000000366ce98ca28338900094e8cbf445776253181749f782546d006"};
+        // Activation: the first BitAIcoin-native block (Synthetic Lab: a new block mined
+        // under BitAIcoin rules; Historical mode would instead require the recovered
+        // genuine abandoned-branch bodies through this height -- see HISTORICAL_LINEAGE.md).
+        consensus.BitAIActivationHeight = 225430;
+        // Easy, lab-appropriate target for exactly the activation block; every block after
+        // it resumes the ordinary 2016-block retarget algorithm using consensus.powLimit as
+        // the floor. PRODUCTION_DIFFICULTY_NOT_FINAL -- this value is a development default,
+        // not a considered choice for any eventual public network.
+        consensus.BitAIActivationPowLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+        // ASCII "BAI", nonzero on BitAIcoin only. Folded into the legacy/BIP143 sighash for
+        // every input spent at height >= BitAIActivationHeight (see REPLAY_PROTECTION.md).
+        consensus.BitAIForkId = 0x424149;
+
+        // Collision-free, generated-once network identity (see docs/CHAIN_IDENTITY.md).
+        // Deliberately not Bitcoin's f9beb4d9/8333, and not shared with any other chain
+        // defined in this file.
+        pchMessageStart[0] = 0xb7;
+        pchMessageStart[1] = 0x78;
+        pchMessageStart[2] = 0xd8;
+        pchMessageStart[3] = 0x11;
+        nDefaultPort = 28333;
+        nPruneAfterHeight = 100000;
+        m_assumed_blockchain_size = 1;
+        m_assumed_chain_state_size = 1;
+
+        genesis = CreateGenesisBlock(1231006505, 2083236893, 0x1d00ffff, 1, 50 * COIN);
+        consensus.hashGenesisBlock = genesis.GetHash();
+        assert(consensus.hashGenesisBlock == uint256{"000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"});
+        assert(genesis.hashMerkleRoot == uint256{"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"});
+
+        // No public seeds for a private Phase 1 lab network (constraint: no accidental or
+        // premature public connectivity). Private nodes connect explicitly via -connect/-addnode.
+        vFixedSeeds.clear();
+        vSeeds.clear();
+
+        fDefaultConsistencyChecks = false;
+        m_is_mockable_chain = false;
+
+        // No real transaction history exists past the fork point yet; this is a private
+        // lab chain, not a chain with production traffic to estimate.
+        m_assumeutxo_data = {};
+
+        chainTxData = ChainTxData{
+            .nTime = 0,
+            .tx_count = 0,
+            .dTxRate = 0.001,
+        };
+
+        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1, 25);
+        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1, 40);
+        base58Prefixes[SECRET_KEY] = std::vector<unsigned char>(1, 153);
+        base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x33, 0x1a, 0x38};
+        base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x33, 0x15, 0x94};
+
+        bech32_hrp = "bai";
+    }
+};
+
+/**
  * Testnet (v3): public test network which is reset from time to time.
  */
 class CTestNetParams : public CChainParams {
@@ -713,6 +836,11 @@ std::unique_ptr<const CChainParams> CChainParams::TestNet4()
     return std::make_unique<const CTestNet4Params>();
 }
 
+std::unique_ptr<const CChainParams> CChainParams::BitAIcoin()
+{
+    return std::make_unique<const CBitAIcoinParams>();
+}
+
 std::vector<int> CChainParams::GetAvailableSnapshotHeights() const
 {
     std::vector<int> heights;
@@ -731,6 +859,7 @@ std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& message)
     const auto testnet4_msg = CChainParams::TestNet4()->MessageStart();
     const auto regtest_msg = CChainParams::RegTest({})->MessageStart();
     const auto signet_msg = CChainParams::SigNet({})->MessageStart();
+    const auto bitaicoin_msg = CChainParams::BitAIcoin()->MessageStart();
 
     if (std::ranges::equal(message, mainnet_msg)) {
         return ChainType::MAIN;
@@ -742,6 +871,8 @@ std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& message)
         return ChainType::REGTEST;
     } else if (std::ranges::equal(message, signet_msg)) {
         return ChainType::SIGNET;
+    } else if (std::ranges::equal(message, bitaicoin_msg)) {
+        return ChainType::BITAICOIN;
     }
     return std::nullopt;
 }
