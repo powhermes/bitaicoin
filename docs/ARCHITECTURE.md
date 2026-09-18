@@ -153,9 +153,26 @@ and this plan's scope boundary):
   logo and mark (`doc/bitaicoin_logo.png`, `doc/bitaicoin_icon.png`) are
   used for documentation/repo branding only in Phase 1 — they have not
   been wired into `src/qt/res/icons/` (`bitcoin.ico`/`.icns`/`.png`,
-  taskbar/about-box icons, splash screen), since that GUI code path is
-  neither built nor tested this phase. Doing so is deferred to whichever
-  future phase actually enables `BUILD_GUI`.
+  taskbar/about-box icons, splash screen), `share/pixmaps/` (Linux icon-
+  theme sizes), `share/setup.nsi.in` (Windows installer wizard graphics),
+  or `cmake/module/Maintenance.cmake`'s macOS `.icns` bundling, since none
+  of that GUI/installer code path is built or tested this phase. A full
+  inventory of every touchpoint was surveyed (see git history for the
+  session that did this) but deliberately not acted on, to avoid shipping
+  untested icon-swap code — deferred to whichever future phase actually
+  enables `BUILD_GUI` and builds installers.
+
+  One concrete finding worth preserving for that future phase:
+  `src/qt/networkstyle.cpp`'s `network_styles[]` table (which programmatically
+  hue-shifts/desaturates the single master `bitcoin.png` per chain, rather
+  than shipping separate icon files per chain) has no `ChainType::BITAICOIN`
+  entry. `NetworkStyle::instantiate()` would return `nullptr` for
+  `-chain=bitaicoin` if the GUI were ever built — this needs a table entry
+  (and a decision on hue/saturation values) before `BUILD_GUI=ON` is ever
+  turned on for this chain. Also note only a raster PNG source (not a
+  vector `.svg`) currently exists for the BitAIcoin mark, so
+  `src/qt/res/src/bitcoin.svg` would need a proper vector replacement
+  rather than a naive raster swap.
 - BIP44 HD wallet coin-type registration.
 - Taproot-domain-separated signing (structurally rejected instead, see
   `docs/CONSENSUS.md` §4).
