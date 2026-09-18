@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="doc/bitaicoin_logo.png" alt="BitAIcoin" width="360">
+</p>
+
 BitAIcoin
 =========
 

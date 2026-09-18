@@ -149,7 +149,13 @@ and this plan's scope boundary):
 
 - Binary/daemon renaming — `bitcoind`/`bitcoin-cli` are unchanged names,
   selected via `-chain=bitaicoin`.
-- GUI/Qt branding (Phase 1 builds with `BUILD_GUI=OFF`).
+- GUI/Qt branding (Phase 1 builds with `BUILD_GUI=OFF`). The project's
+  logo and mark (`doc/bitaicoin_logo.png`, `doc/bitaicoin_icon.png`) are
+  used for documentation/repo branding only in Phase 1 — they have not
+  been wired into `src/qt/res/icons/` (`bitcoin.ico`/`.icns`/`.png`,
+  taskbar/about-box icons, splash screen), since that GUI code path is
+  neither built nor tested this phase. Doing so is deferred to whichever
+  future phase actually enables `BUILD_GUI`.
 - BIP44 HD wallet coin-type registration.
 - Taproot-domain-separated signing (structurally rejected instead, see
   `docs/CONSENSUS.md` §4).
