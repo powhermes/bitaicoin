@@ -17,10 +17,13 @@ review alone unless explicitly labeled as such in Known Limitations.
 2b19309 BitAIcoin Phase 1 M1: chain identity scaffolding (no-op fork)
 36e2fe4 BitAIcoin Phase 1 M2: fork anchor + activation difficulty transition
 aa5567d BitAIcoin Phase 1 M3: replay protection + Taproot-spend rejection
+(M5)    BitAIcoin Phase 1 M5: SegWit activation, Taproot deployment lock-out,
+        historical retarget-clamp bugfix
 ```
 
 (M4's three-node network test and this documentation suite are verified
-live/written directly against this branch; see below.)
+live/written directly against this branch; see below. M5's exact commit
+hash is recorded in `git log bitaicoin-phase1` once committed.)
 
 ## Build environment
 
@@ -69,11 +72,51 @@ weak-linked symbol resolves to null at runtime); fixed with an
 - Fork anchor hash (real Bitcoin mainnet, enforced by consensus):
   `0000000000000366ce98ca28338900094e8cbf445776253181749f782546d006`
 - Activation height (first BitAIcoin-native block): **225430**
-- First BitAIcoin block hash (this test run):
-  `2a9a48dc2492d70e0187cd8a1972e6bda777d7653cfa237504cedc19c6c56ec8`
+- First BitAIcoin block hash (M5 test run, post SegWit-activation fix):
+  `05b52b03589c11c30c909a9c8e33071344c61ce996c202554d139e81e417d45d`
+  (an earlier test run recorded a different hash,
+  `2a9a48dc2492d70e0187cd8a1972e6bda777d7653cfa237504cedc19c6c56ec8`,
+  from before SegWit activated at this height — both are valid
+  activation blocks under their respective rule sets, since nothing about
+  the fork-anchor/activation mechanism itself changed between them; only
+  the fresh mining nonce/timestamp differs)
 - Activation block `bits`/target: `207fffff` (matches
   `BitAIActivationPowLimit`'s compact form exactly, confirmed via
   `getblock`)
+
+## Consensus bugfix: historical retarget clamp (M5)
+
+Rebasing `SegwitHeight` to `BitAIActivationHeight` (see Resolved section
+in `docs/CONSENSUS.md`) required a full historical reimport to
+revalidate the chain under the new rules (an ordinary node restart
+correctly refuses to trust old validation results after a consensus
+parameter change: `"Witness data for blocks after height 225430 requires
+validation. Please restart with -reindex."`).
+
+That reimport surfaced a genuine, previously-latent bug: real Bitcoin's
+very first difficulty retarget (height 2016) was rejected as
+`bad-diffbits` under BitAIcoin's rules. Root cause: `consensus.powLimit`
+was loosened chain-wide back in M2 to let the easy activation block mine
+at all, but that same field is also read by `CalculateNextWorkRequired`'s
+internal clamp for *every* retarget calculation, including real
+historical ones below the fork point. Real block 2016's recorded `nBits`
+is the result of mainnet's original retarget computation being clamped
+down to mainnet's *original, strict* powLimit — recomputing it against
+BitAIcoin's *loosened* powLimit produces a different, unclamped (looser)
+value that doesn't match the real historical record. This was never
+caught before because the original M1-era historical import (which
+produced the height-225430 chain used through M4) ran *before* M2
+introduced the loosened `powLimit`, and Bitcoin Core doesn't revalidate
+already-connected blocks on ordinary restart — so this bug had zero
+observable effect until something (this SegWit change) forced a full
+reimport for the first time since M2.
+
+Fixed by adding `consensus.BitAIHistoricalPowLimit` (real mainnet's
+original powLimit, used only inside the retarget clamp for heights below
+`BitAIActivationHeight`) — see `docs/CONSENSUS.md` point 4. Verified via
+a full, clean historical reimport reaching height 225429 with the
+correct fork-anchor hash, zero `bad-diffbits` rejections, and the full
+738-case unit test suite still passing with zero regressions.
 
 ## Chain identity
 
@@ -93,18 +136,27 @@ otherwise" design in `docs/CONSENSUS.md`.
 
 ## Wallet transfer test
 
-Coinbase matured on Node A (100 confirmations after the activation
-block), then a legacy (P2PKH) `sendtoaddress` transfer confirmed and
-propagated: Node A → Node B → Node C, each hop verified by comparing
-`getbalance` on the receiving node against the expected amount after
-confirmation. All three nodes converged on identical `getblockcount` /
-`getbestblockhash` throughout.
+**M4 (original, legacy addresses):** coinbase matured on Node A (100
+confirmations after the activation block), then a legacy (P2PKH)
+`sendtoaddress` transfer confirmed and propagated: Node A → Node B →
+Node C, each hop verified by comparing `getbalance` on the receiving node
+against the expected amount after confirmation. All three nodes
+converged on identical `getblockcount` / `getbestblockhash` throughout.
+(Legacy addresses were used deliberately at the time, not incidentally —
+a bech32 destination was tried first and was correctly rejected at
+consensus level as `"unexpected-witness"`, which is what surfaced the
+SegWit-activation-timing question in the first place.)
 
-(Legacy addresses were used deliberately, not incidentally — see
-`docs/CONSENSUS.md`'s open question on SegWit/Taproot activation timing;
-a bech32 destination was tried first and correctly rejected at consensus
-level as `"unexpected-witness"`, which is what surfaced that open
-question in the first place.)
+**M5 (native SegWit, single-node):** after rebasing `SegwitHeight` to
+`BitAIActivationHeight` (see `docs/CONSENSUS.md`), a fresh bech32
+(P2WPKH) address (`bai1q...`) was generated, mined to directly, matured,
+and a native SegWit `sendtoaddress` between two bech32 addresses in the
+same wallet confirmed successfully — the original blocker is resolved.
+Multi-node propagation of SegWit transactions specifically was not
+re-verified in this pass (Node B/C were not re-seeded from the M5 chain
+during this session — see Known Limitations); the underlying P2P
+propagation mechanism itself is unmodified from M4's already-proven
+three-node test.
 
 ## Replay-protection test
 
@@ -132,26 +184,27 @@ nodes. All three stopped cleanly at the end of the test
    check at `BitAIForkAnchorHeight`). A live test would require forging a
    genuine competing block at real 2013-era Bitcoin mainnet difficulty,
    which is computationally impractical to construct as a test fixture.
-2. **No live functional test of the Taproot-spend rejection path.**
-   Verified by code review only, reusing the same `IsPayToTaproot()`
-   predicate used elsewhere in the codebase for the analogous real-Bitcoin
-   check. No Taproot output can currently exist on this chain at its
-   current height under either the real BIP9 deployment schedule or
-   BitAIcoin's own configuration (see `docs/CONSENSUS.md`'s open
-   question), so there is no way to construct a live spend to test against
-   without first resolving that question.
+2. ~~No live functional test of the Taproot-spend rejection path.~~
+   **RESOLVED (M5).** Now that SegWit is active (see below), a
+   Taproot-shaped (witness v1) output can be created. Live test: a
+   Taproot output was created via the wallet and mined in, a spend of it
+   was signed successfully (Schnorr signature, `"complete": true`), and
+   submitting that spend was rejected identically by both
+   `testmempoolaccept` and `sendrawtransaction` with
+   `bitai-taproot-spend-rejected` — confirming `CheckInputScripts`'
+   rejection holds through the real signing → broadcast path, not just in
+   code review.
 3. **No live network-level replay-protection test** (i.e., no test
    literally submits a real-Bitcoin-signed transaction to a live
    BitAIcoin node or vice versa). The in-process unit vectors in
    `bitaicoin_forkid_tests.cpp` are mathematically equivalent to this
    (same signature never verifies under both sighash domains for
    identical transaction data) and are considered sufficient for Phase 1.
-4. **SegWit/Taproot activation timing on BitAIcoin is an open design
-   question, not yet decided.** Currently both remain permanently dormant
-   because their inherited real-mainnet activation heights are
-   unreachable at BitAIcoin's own height scale. Practical consequence:
-   wallets must use legacy addresses for now. Full detail and tradeoffs
-   in `docs/CONSENSUS.md`.
+4. ~~SegWit/Taproot activation timing on BitAIcoin is an open design
+   question, not yet decided.~~ **RESOLVED (M5).** SegWit now activates
+   at `BitAIActivationHeight`; Taproot's deployment is `NEVER_ACTIVE`.
+   See `docs/CONSENSUS.md`'s "Resolved" section for the decision and
+   verification evidence.
 5. **Node B and Node C were seeded by copying Node A's validated
    `blocks/`+`chainstate/` directories, not by independently re-running
    the P2P historical import three times.** A second/third from-scratch
@@ -164,7 +217,11 @@ nodes. All three stopped cleanly at the end of the test
    to revalidate 225,430 blocks three separate times and produces
    byte-identical results; it does mean this specific run did not
    independently prove three-way P2P import reliability from a cold
-   start.
+   start. **Note:** as of M5, Node A's chain was fully rebuilt (see the
+   retarget-clamp bugfix above) but Node B/C's copies were *not*
+   refreshed in this session — their `blocks/`/`chainstate/` still
+   reflect the pre-M5 chain and should be re-seeded from the current
+   Node A before any further multi-node testing.
 6. **Difficulty ceiling (`consensus.powLimit`) and activation target
    (`BitAIActivationPowLimit`) are explicit development placeholders**
    (`PRODUCTION_DIFFICULTY_NOT_FINAL` in code comments), chosen for lab

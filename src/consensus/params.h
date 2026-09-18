@@ -150,12 +150,27 @@ struct Params {
      * BitAIForkId: nonzero constant folded into the legacy/BIP143 sighash for
      * every input spent at height >= BitAIActivationHeight, making BitAIcoin
      * signatures unconditionally invalid under Bitcoin's sighash and vice versa.
+     *
+     * BitAIHistoricalPowLimit: real Bitcoin mainnet's original (strict) powLimit,
+     * used ONLY inside CalculateNextWorkRequired's retarget-clamp for retargets
+     * below BitAIActivationHeight. `powLimit` itself is loosened chain-wide (see
+     * its assignment in kernel/chainparams.cpp) so BitAIcoin's own post-activation
+     * blocks can mine easily -- but real historical retargets that were themselves
+     * clamped to mainnet's tight ceiling (e.g. Bitcoin's very first retarget, real
+     * height 2016, where the raw computed target exceeded mainnet's powLimit and
+     * got clamped back down to it) must be recomputed against that SAME tight
+     * ceiling, or the recomputed nBits will not match the real, already-recorded
+     * historical value and ContextualCheckBlockHeader will reject the block as
+     * "bad-diffbits" -- see docs/CONSENSUS.md. Every other chain leaves
+     * BitAIActivationHeight at INT_MAX, so the height gate that selects this field
+     * is never reached there and behavior is unchanged.
      */
     int BitAIForkAnchorHeight{std::numeric_limits<int>::max()};
     uint256 BitAIForkAnchorHash{};
     int BitAIActivationHeight{std::numeric_limits<int>::max()};
     uint256 BitAIActivationPowLimit{};
     uint32_t BitAIForkId{0};
+    uint256 BitAIHistoricalPowLimit{};
 
     /**
      * If true, witness commitments contain a payload equal to a Bitcoin Script solution

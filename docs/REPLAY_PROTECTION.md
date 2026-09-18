@@ -59,7 +59,7 @@ which inputs/outputs to include in the preimage; only the byte that gets
 serialized into the hash itself is transformed.
 
 **Taproot (BIP341/342) is explicitly out of scope** — see
-`docs/CONSENSUS.md` point 4. Rather than build an incorrect or partial
+`docs/CONSENSUS.md` point 5. Rather than build an incorrect or partial
 Schnorr-sighash fork-ID scheme, BitAIcoin structurally rejects any
 transaction spending a Taproot output post-activation, closing the gap by
 elimination.

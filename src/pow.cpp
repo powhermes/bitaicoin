@@ -73,7 +73,16 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
         nActualTimespan = params.nPowTargetTimespan*4;
 
     // Retarget
-    const arith_uint256 bnPowLimit = UintToArith256(params.powLimit);
+    // BitAIcoin: retargets for real historical blocks below the activation height
+    // must clamp against real Bitcoin mainnet's original (strict) powLimit, not
+    // BitAIcoin's own loosened chain-wide ceiling, to reproduce the real,
+    // already-recorded historical nBits values wherever the real retarget was
+    // itself clamped to mainnet's ceiling -- see BitAIHistoricalPowLimit's comment
+    // in consensus/params.h and docs/CONSENSUS.md. Every other chain leaves
+    // BitAIActivationHeight at INT_MAX, so this is unreachable/unaffected there.
+    const bool use_historical_pow_limit = params.BitAIActivationHeight != std::numeric_limits<int>::max()
+        && pindexLast->nHeight + 1 < params.BitAIActivationHeight;
+    const arith_uint256 bnPowLimit = UintToArith256(use_historical_pow_limit ? params.BitAIHistoricalPowLimit : params.powLimit);
     arith_uint256 bnNew;
 
     // Special difficulty rule for Testnet4

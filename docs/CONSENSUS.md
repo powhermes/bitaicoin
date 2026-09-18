@@ -17,8 +17,8 @@ exactly as they always have:
 | BIP65 (CHECKLOCKTIMEVERIFY) | 388381 | Inherited, real mainnet value |
 | BIP66 (strict DER) | 363725 | Inherited, real mainnet value |
 | CSV (BIP68/112/113) | 419328 | Inherited, real mainnet value |
-| SegWit | 481824 | Inherited, real mainnet value — **see Open Question below** |
-| Taproot (BIP340-342, BIP9 bit 2) | activation window 709632+ | Inherited, real mainnet value — **structurally rejected post-activation regardless, see below** |
+| SegWit | 481824 on real mainnet; **rebased to 225430 (`BitAIActivationHeight`) on BitAIcoin** | Deliberately rebased, not inherited — see resolved decision below |
+| Taproot (BIP340-342, BIP9 bit 2) | 709632+ on real mainnet; **`NEVER_ACTIVE` on BitAIcoin** | Deliberately disabled, not inherited — structurally rejected post-activation regardless, see below |
 | Subsidy schedule (50 coin, halving every 210,000 blocks) | — | Inherited unmodified, including through the fork point |
 | `nPowTargetTimespan` / `nPowTargetSpacing` | — | Inherited (14 days / 10 minutes), governs retargeting cadence both before and after the fork |
 | Signature/script verification rules (opcodes, standardness at consensus level, sigop limits, block/tx size limits) | — | Entirely unmodified |
@@ -78,7 +78,38 @@ before hashing. This is unconditional by block height, not a
 signature-embedded flag an attacker could omit — there is no downgrade
 path.
 
-### 4. Taproot-spend rejection (new, scope boundary — not a sighash fix)
+### 4. Historical retarget clamp (new, bugfix)
+
+`CalculateNextWorkRequired`'s (`src/pow.cpp`) internal clamp — the step
+that limits how much the raw retarget computation can loosen the target
+before returning it — reads `consensus.BitAIHistoricalPowLimit` (real
+Bitcoin mainnet's original, strict powLimit) instead of `consensus.powLimit`
+(BitAIcoin's loosened, chain-wide ceiling) whenever the retarget being
+computed applies to a height below `BitAIActivationHeight`. Every other
+chain leaves `BitAIActivationHeight` at `INT_MAX`, so this branch is
+unreachable there and mainnet/testnet/regtest behavior is unchanged.
+
+This was discovered as a genuine regression, not designed in advance:
+real Bitcoin's very first difficulty retarget (height 2016) computed a
+raw target *looser* than mainnet's real powLimit and got clamped back
+down to exactly that ceiling — which is why block 2016's recorded
+`nBits` equals genesis's. Loosening `consensus.powLimit` chain-wide (see
+point 5 below) removed that clamp for the *entire* chain, including for
+recomputing this real historical retarget during a full revalidation —
+BitAIcoin would then compute a different (looser) target than the one
+actually recorded on real block 2016, and `ContextualCheckBlockHeader`
+would reject it as `bad-diffbits`. This was latent since the original
+`powLimit` change (never exercised until a later change — the SegWit
+rebase below — forced a full historical reimport) and is now fixed by
+clamping pre-activation retargets against the real, strict, original
+ceiling instead. `CheckProofOfWork`/`DeriveTarget` are unaffected by this
+fix and continue to use the loosened `consensus.powLimit` unconditionally,
+chain-wide: that check only rejects targets *looser* than the ceiling,
+and every real historical block's target is already stricter than even
+mainnet's own original ceiling, so using a looser ceiling there never
+incorrectly rejects genuine historical data.
+
+### 5. Taproot-spend rejection (new, scope boundary — not a sighash fix)
 
 Real Bitcoin's Taproot (BIP341/342) sighash algorithm uses a
 domain-separated tagged hash with Schnorr signatures, architecturally
@@ -94,52 +125,53 @@ connection), not just as wallet/RPC policy. It closes the replay-protection
 gap by elimination rather than by mitigation. A real fork-ID-aware
 Taproot sighash design is left for a future phase.
 
-Practically, this rule has no observable effect on BitAIcoin today: since
-`SegwitHeight`/Taproot's BIP9 deployment are inherited dormant at
-mainnet's real (very high) activation heights (see Open Question below),
-no Taproot output can exist on BitAIcoin's chain yet under any current
-configuration. The rejection code exists and is exercised by code review
-against the same `IsPayToTaproot()` predicate used elsewhere in the
-codebase, but has no live functional test for exactly this reason — see
-`PHASE1_REPORT.md`'s Known Limitations.
+Practically, this rule now has a genuine live functional test (not just
+code review): a Taproot-shaped output was created via the wallet, mined
+in, and a subsequent spend of it was signed successfully (the wallet
+itself has no problem constructing a valid Schnorr-signed spend) but
+rejected identically by both `testmempoolaccept` and `sendrawtransaction`
+with `bitai-taproot-spend-rejected`, confirming the rule is enforced
+through `CheckInputScripts` regardless of mempool-policy vs.
+block-connection call site (both share the same function) — see
+`PHASE1_REPORT.md`.
 
-## Open question: SegWit / Taproot activation timing on BitAIcoin
+## Resolved: SegWit / Taproot activation timing on BitAIcoin
 
 This was discovered as a practical blocker during Phase 1 wallet testing
-(see `PHASE1_REPORT.md`), not decided in advance, and is recorded here
-rather than silently resolved:
+(a `sendtoaddress` to a bech32 address was rejected as `"unexpected-witness"`,
+since BitAIcoin originally inherited SegWit's real mainnet activation
+height, 481824, which is unreachable at BitAIcoin's own height scale
+within any realistic lab timeframe), recorded as an open question rather
+than silently resolved, and has since been decided and implemented:
 
-BitAIcoin currently inherits SegWit's and Taproot's real mainnet
-activation heights (481824 and 709632-ish respectively) verbatim from
-`CMainParams`. Since BitAIcoin's own chain height starts at 225430 and
-grows slowly in a private lab (no 481824+ blocks will ever be mined at
-that literal height under any realistic Phase-1 testing), **SegWit and
-Taproot are permanently dormant on BitAIcoin as currently configured** —
-not because a decision was made to disable them, but because their
-inherited activation heights are unreachable in practice.
+- **`consensus.SegwitHeight` is rebased from mainnet's real 481824 to
+  `BitAIActivationHeight` (225430) itself** — SegWit is active from the
+  very first BitAIcoin-native block onward. This was chosen over leaving
+  it permanently dormant because legacy-only addresses indefinitely was a
+  real, ongoing usability cost, and activating from block one (rather
+  than some other arbitrary post-fork height) is the simplest rule to
+  state and reason about. Verified live: `getdeploymentinfo` reports
+  `segwit: active` at height 225430, and a native bech32 `sendtoaddress`
+  confirms successfully.
+- **Taproot's BIP9 deployment is set to `NEVER_ACTIVE`** (matching how
+  the unused `TESTDUMMY` deployment is already handled), rather than left
+  on mainnet's real activation window (`min_activation_height=709632`).
+  Two reasons: first, at BitAIcoin's trivially-easy lab difficulty,
+  reaching absolute height 709632 (~484,000 blocks past the fork point)
+  is realistically achievable within a single extended testing session,
+  which would let Taproot's deployment ambiguously/accidentally lock in
+  without anyone deciding that; `NEVER_ACTIVE` removes that ambiguity
+  outright. Second, this changes nothing about the actual security
+  guarantee: `CheckInputScripts` already structurally rejects any spend
+  of a Taproot-shaped output at height ≥ `BitAIActivationHeight`
+  unconditionally (point 5 above), regardless of this deployment's own
+  state — Taproot outputs can be created (as still-valid "future
+  upgrade" witness programs, exactly as real pre-activation Bitcoin
+  treats unknown witness versions) but can never be spent on BitAIcoin.
+  Verified live: `getdeploymentinfo` no longer lists a `taproot` entry at
+  all post-activation, and the spend-rejection test above confirms the
+  practical guarantee holds.
 
-This has an immediate practical consequence: wallets must use legacy
-(P2PKH) addresses for now. A `sendtoaddress` to a bech32 (P2WPKH) address
-produces a witness-carrying transaction that `CheckWitnessMalleation`
-correctly rejects as `"unexpected-witness"` at this chain height, and (as
-discovered during testing) a wallet will keep auto-rebroadcasting such an
-unconfirmed transaction on every load, re-poisoning the mempool.
-
-This is left as an explicit open question rather than resolved here
-because it is a real design decision with tradeoffs, not a bug:
-
-- Lowering `SegwitHeight`/Taproot's deployment window to something reachable
-  on BitAIcoin's own height scale would enable native SegWit/Taproot
-  addresses, but reopens the Taproot replay-protection gap described in
-  point 4 above (which would then need a real fix, not a rejection rule).
-  It would also mean BitAIcoin's early post-fork blocks are governed by
-  different soft-fork timing than the equivalent real Bitcoin heights,
-  which is a bigger consensus-identity decision than Phase 1 was scoped
-  to make unilaterally.
-- Leaving it as-is (permanently dormant) is simplest and keeps Phase 1's
-  diff minimal, at the cost of legacy-only addresses indefinitely.
-
-No production or user-facing decision has been made either way. This
-should be resolved explicitly, with the user, before any phase that
-depends on native SegWit/Taproot support (e.g. most realistic L402
-agent-payment designs — see `docs/AGENT_PAYMENTS.md`).
+A real fork-ID-aware Taproot sighash design (enabling actual Taproot
+spends with replay protection) remains out of scope, deferred to a
+future phase, per `docs/REPLAY_PROTECTION.md`.

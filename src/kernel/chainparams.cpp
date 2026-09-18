@@ -237,8 +237,18 @@ public:
         consensus.BIP65Height = 388381;
         consensus.BIP66Height = 363725;
         consensus.CSVHeight = 419328;
-        consensus.SegwitHeight = 481824;
-        consensus.MinBIP9WarningHeight = 483840;
+        // Rebased from mainnet's real 481824 to BitAIActivationHeight itself (see
+        // docs/CONSENSUS.md's former "open question", now resolved): mainnet's real SegWit
+        // height is unreachable at BitAIcoin's own height scale within any realistic lab
+        // timeframe, which made native bech32 (P2WPKH/P2WSH) wallet addresses permanently
+        // unusable and was discovered as a practical blocker during Phase 1 wallet testing.
+        // Activating SegWit from the very first BitAIcoin-native block removes that blocker.
+        // This does NOT reopen the Taproot replay-protection gap: CheckInputScripts already
+        // structurally rejects any spend of a Taproot-shaped output at height >=
+        // BitAIActivationHeight regardless of SegWit/Taproot deployment state (see
+        // docs/REPLAY_PROTECTION.md and the Taproot deployment change just below).
+        consensus.SegwitHeight = 225430; // == BitAIActivationHeight (set again, below, as the single source of truth)
+        consensus.MinBIP9WarningHeight = 227446; // SegwitHeight + one confirmation window (2016), same relative offset as mainnet
         // NOT mainnet's real (strict) powLimit. CheckProofOfWork/DeriveTarget reject any
         // block whose derived target exceeds consensus.powLimit, chain-wide -- so this must
         // be at least as permissive as BitAIActivationPowLimit below, or the activation block
@@ -263,12 +273,25 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].threshold = 1815;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].period = 2016;
 
-        // Taproot deployment: copied from mainnet, dormant pre-activation (constraint: no
-        // retroactive change to genuine historical Bitcoin consensus below the fork anchor).
+        // Taproot deployment: deliberately set to NEVER_ACTIVE (see docs/CONSENSUS.md's
+        // former "open question", now resolved), not copied from mainnet's real window.
+        // Below the fork anchor this changes nothing -- historical blocks are governed by
+        // whatever Taproot's real activation state actually was in real Bitcoin history at
+        // the time, since script_flag_exceptions above already carries the one genuine
+        // mainnet BIP16/Taproot compatibility exception needed for those blocks to validate.
+        // Above the fork anchor, mainnet's real window (min_activation_height=709632) is a
+        // literal chain height that BitAIcoin's own trivially-easy-difficulty lab chain could
+        // plausibly reach and lock in within a normal testing session, which would be
+        // ambiguous and untested. NEVER_ACTIVE removes that ambiguity outright; it changes
+        // nothing about the actual security guarantee, since CheckInputScripts already
+        // structurally rejects any spend of a Taproot-shaped output at height >=
+        // BitAIActivationHeight unconditionally (see docs/REPLAY_PROTECTION.md) -- Taproot
+        // outputs can be created (as still-valid "future upgrade" witness programs) but can
+        // never be spent on BitAIcoin, regardless of this deployment's own state.
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].bit = 2;
-        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = 1619222400; // April 24th, 2021
-        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = 1628640000; // August 11th, 2021
-        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 709632;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].threshold = 1815;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].period = 2016;
 
@@ -287,6 +310,10 @@ public:
         // under BitAIcoin rules; Historical mode would instead require the recovered
         // genuine abandoned-branch bodies through this height -- see HISTORICAL_LINEAGE.md).
         consensus.BitAIActivationHeight = 225430;
+        // SegwitHeight above is set to this same literal (225430) -- SegWit activates from
+        // the very first BitAIcoin-native block. Asserted here, once, so the two literals
+        // can never silently drift apart.
+        assert(consensus.SegwitHeight == consensus.BitAIActivationHeight);
         // Easy, lab-appropriate target for exactly the activation block; every block after
         // it resumes the ordinary 2016-block retarget algorithm using consensus.powLimit as
         // the floor. PRODUCTION_DIFFICULTY_NOT_FINAL -- this value is a development default,
@@ -295,6 +322,12 @@ public:
         // ASCII "BAI", nonzero on BitAIcoin only. Folded into the legacy/BIP143 sighash for
         // every input spent at height >= BitAIActivationHeight (see REPLAY_PROTECTION.md).
         consensus.BitAIForkId = 0x424149;
+        // Real Bitcoin mainnet's original (strict) powLimit -- exactly CMainParams's value,
+        // NOT this chain's loosened one. Used only by CalculateNextWorkRequired's retarget
+        // clamp for real historical retargets below BitAIActivationHeight, so recomputing
+        // them reproduces the real, already-recorded nBits values byte-for-byte (see
+        // BitAIHistoricalPowLimit's comment in consensus/params.h).
+        consensus.BitAIHistoricalPowLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
         // Collision-free, generated-once network identity (see docs/CHAIN_IDENTITY.md).
         // Deliberately not Bitcoin's f9beb4d9/8333, and not shared with any other chain
