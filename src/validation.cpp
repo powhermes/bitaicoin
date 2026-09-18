@@ -4130,9 +4130,20 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     AssertLockHeld(::cs_main);
     assert(pindexPrev != nullptr);
     const int nHeight = pindexPrev->nHeight + 1;
+    const Consensus::Params& consensusParams = chainman.GetConsensus();
+
+    // BitAIcoin fork anchor: the block at this height must be the specific,
+    // independently-verified real Bitcoin mainnet block BitAIcoin's history
+    // is required to descend from. Every other chain leaves
+    // BitAIForkAnchorHeight at INT_MAX, so this is unreachable/unaffected
+    // there. See docs/HISTORICAL_LINEAGE.md.
+    if (nHeight == consensusParams.BitAIForkAnchorHeight &&
+        block.GetHash() != consensusParams.BitAIForkAnchorHash) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-bitai-fork-anchor",
+                              "block at the BitAIcoin fork-anchor height does not match the required historical ancestor");
+    }
 
     // Check proof of work
-    const Consensus::Params& consensusParams = chainman.GetConsensus();
     if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
 

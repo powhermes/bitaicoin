@@ -212,11 +212,14 @@ public:
  * rules (easy one-time difficulty transition, fork-ID sighash domain
  * separation, Taproot-spend rejection). See doc/bitaicoin/CONSENSUS.md.
  *
- * Every buried-deployment height, powLimit, and subsidy parameter below is
- * copied verbatim from CMainParams and left dormant (none of BIP34/65/66/
- * CSV/Segwit/Taproot are active by height 225429 on real Bitcoin history) --
+ * Every buried-deployment height and subsidy parameter below is copied
+ * verbatim from CMainParams and left dormant (none of BIP34/65/66/CSV/
+ * Segwit/Taproot are active by height 225429 on real Bitcoin history) --
  * this is a deliberate no-op fork below the activation height, not a
- * reduced/simplified rule set.
+ * reduced/simplified rule set. powLimit is the one deliberate exception:
+ * it is set permissively (lab-easy), not to mainnet's real value, because
+ * it is also the hard ceiling CheckProofOfWork enforces chain-wide -- see
+ * the comment at its assignment below for why.
  */
 class CBitAIcoinParams : public CChainParams {
 public:
@@ -236,7 +239,17 @@ public:
         consensus.CSVHeight = 419328;
         consensus.SegwitHeight = 481824;
         consensus.MinBIP9WarningHeight = 483840;
-        consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+        // NOT mainnet's real (strict) powLimit. CheckProofOfWork/DeriveTarget reject any
+        // block whose derived target exceeds consensus.powLimit, chain-wide -- so this must
+        // be at least as permissive as BitAIActivationPowLimit below, or the activation block
+        // (and every post-activation block that inherits its easy target until the next
+        // natural retarget boundary) would be rejected as "high-hash" even with a winning
+        // nonce. Real historical blocks below the activation height are unaffected: their
+        // actual difficulty was always vastly stricter than even mainnet's own powLimit, let
+        // alone this more permissive lab ceiling, so relaxing it cannot invalidate anything
+        // that already validated. PRODUCTION_DIFFICULTY_NOT_FINAL -- a lab-appropriate choice,
+        // not a considered one for any eventual public network.
+        consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
         consensus.nPowTargetSpacing = 10 * 60;
         consensus.fPowAllowMinDifficultyBlocks = false;

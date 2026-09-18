@@ -16,6 +16,19 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
     assert(pindexLast != nullptr);
     unsigned int nProofOfWorkLimit = UintToArith256(params.powLimit).GetCompact();
 
+    // BitAIcoin one-time activation difficulty transition: the first
+    // BitAIcoin-native block gets a fresh, easy, lab-appropriate target,
+    // independent of whatever difficulty real Bitcoin history had reached
+    // at the fork anchor. Every block after it falls through to the
+    // ordinary logic below unmodified -- it simply inherits this block's
+    // nBits (like any other non-retarget-boundary height) until the next
+    // natural 2016-block boundary, at which point normal retargeting
+    // resumes using consensus.powLimit as the floor. Every other chain
+    // leaves BitAIActivationHeight at INT_MAX, so this is unreachable there.
+    if (pindexLast->nHeight + 1 == params.BitAIActivationHeight) {
+        return UintToArith256(params.BitAIActivationPowLimit).GetCompact();
+    }
+
     // Only change once per difficulty adjustment interval
     if ((pindexLast->nHeight+1) % params.DifficultyAdjustmentInterval() != 0)
     {
