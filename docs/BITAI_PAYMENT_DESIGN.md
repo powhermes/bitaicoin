@@ -832,14 +832,343 @@ unrelated time.
 
 ---
 
+## 15. BitAI Payment Direct HTTP 402 Protocol v1
+
+Implements §13's "direct/non-marketplace use" note and gives §3's
+sketched `/v1/authorizations`/`/v1/challenges` endpoints their first real
+shape. The marketplace-mediated path (§14) is completely untouched by
+this section — no marketplace code, type, or dependency is used or
+introduced here, and none of §14's acceptance test changes. This proves
+BitAI Payment is a genuinely reusable payment layer, not something
+married to one marketplace, exactly as §13 already claimed on paper.
+
+**Naming, deliberately not "L402":** this is **BitAI Pay-402**
+(`protocol: "bitai-pay-402/1"` in every wire artifact below), a custodial
+HTTP-402 payment protocol backed by BitAI Payment's ledger. It borrows
+the general HTTP-402-plus-retry shape popularized by Lightning's L402,
+but nothing else — no macaroons, no Lightning invoices, no channels in
+v1. Calling it "L402" anywhere in code or docs would misrepresent both
+the credential format (a signed JSON receipt, not a macaroon) and the
+settlement mechanism (an instant custodial ledger transfer, not an HTLC).
+
+### Roles
+
+- **Payer** — an `INDIVIDUAL` principal (§4) with its own BitAI Payment
+  account and its own funds (typically arrived via §8's ordinary deposit
+  flow).
+- **Payee** — a second, independent `INDIVIDUAL` principal, operating an
+  arbitrary HTTP resource server that has nothing to do with the agent
+  marketplace. Both are provisioned out-of-band exactly like every other
+  principal (§4) — no new provisioning mechanism.
+- **BitAI Payment** — moves funds between the two accounts and signs the
+  proof. It never sees the resource itself, never brokers the HTTP
+  conversation between payer and payee, and is not on the critical path
+  for the payee deciding whether to serve the resource — that decision is
+  the payee's alone, made from an offline signature check (see below).
+
+### Flow
+
+```
+1. Payer -> Service:      GET /some/protected/resource            (no payment yet)
+2. Service -> Payer:      402 Payment Required
+                           { bitaiPay402Challenge: <Challenge, see below> }
+3. Payer -> BitAI Payment: POST /v1/authorizations   (signed request, §4, as the payer)
+                           -> { authorizationId, state: "CAPTURED", ledgerTransactionId,
+                                proof: <SignedProof, see below> }
+4. Payer -> Service:      GET /some/protected/resource
+                           X-Bitai-Pay402-Proof: <base64(SignedProof JSON)>
+5. Service:                verify the proof OFFLINE (no call back to BitAI Payment
+                            required on this hot path — same philosophy as §7's
+                            receipt verification), then serve the resource.
+```
+
+Step 3 is a single call: v1 auto-captures the full amount synchronously
+(see "Why auto-capture" below), matching this feature's actual
+requirement ("instant... the existing custodial ledger can make this
+instant") rather than the two-step hold/capture originally sketched in
+§3/§5 for a hypothetical metered-billing use case that isn't needed yet.
+
+### Challenge (minted by the payee — not a BitAI Payment API call)
+
+A Challenge is not a BitAI-Payment-persisted entity. The payee mints it
+unilaterally, the moment it decides to price an unpaid request — no
+round trip to BitAI Payment is needed to hand a price to a payer, and
+this keeps BitAI Payment ignorant of the payee's resource catalog
+entirely (consistent with §7's "BitAI Payment has no visibility into
+individual [...] transactions" principle, extended here to direct use).
+
+```ts
+interface BitaiPay402Challenge {
+  protocol: "bitai-pay-402/1";
+  schemaVersion: 1;
+  paymentReference: string;   // opaque, unguessable, minted fresh per challenge by the PAYEE
+  resourceRef: string;        // the payee's own canonical id for the exact resource/request being priced
+  payeePrincipalId: string;
+  amountSatoshis: string;     // decimal string, integer satoshis — never a float (§6's discipline)
+  asset: "BAIC_TEST" | "BAIC";
+  expiresAt: string;          // ISO 8601 — after this, BitAI Payment refuses to authorize against it
+  bitaiPaymentUrl: string;    // which BitAI Payment deployment governs this challenge
+}
+```
+
+Returned as the JSON body of the `402` response
+(`{ "bitaiPay402Challenge": { ... } }`). `paymentReference` must be
+unique per payee for the life of that payee's principal — a UUID is
+sufficient and is what the reference implementation uses.
+
+### Authorize/capture request (payer -> BitAI Payment)
+
+`POST /v1/authorizations`, signed as the payer (§4):
+
+```ts
+interface CreateAuthorizationRequest {
+  idempotencyKey: string;      // ordinary retry-safety key (§9) — NOT the single-use guarantee, see below
+  paymentReference: string;    // copied verbatim from the Challenge
+  payeePrincipalId: string;    // copied verbatim from the Challenge
+  resourceRef: string;         // copied verbatim from the Challenge — bound into the signed proof
+  amountSatoshis: string;      // copied verbatim from the Challenge
+  asset: "BAIC_TEST" | "BAIC";
+  expiresAt: string;           // copied verbatim from the Challenge
+}
+```
+
+### Verification and state-transition rules (enforced by BitAI Payment, in order)
+
+1. `expiresAt` must be in the future at the time of the call, else `410`.
+2. `payeePrincipalId !== payerPrincipalId` (the authenticated caller),
+   else `422` — a principal cannot pay itself.
+3. **Single-use is enforced by a real uniqueness constraint, not
+   application logic alone**: `UNIQUE (payee_principal_id,
+   payment_reference)` on the new `authorizations` table. This is the
+   actual "challenge is single-use" guarantee — `idempotencyKey` above
+   only protects a single caller's own retries (§9's ordinary
+   insert-or-return-existing discipline), exactly as it does for
+   deposits/withdrawals. The two keys serve different purposes and both
+   exist for exactly that reason.
+4. Resolution once a `(payee, paymentReference)` row already exists:
+   - same `payerPrincipalId` as the stored row → return the existing,
+     already-captured result again (idempotent — covers a lost response
+     or a retried call with a different `idempotencyKey`).
+   - different `payerPrincipalId` → `409 ALREADY_PAID_BY_OTHER`, no funds
+     move. (Nothing stops a second principal from *attempting* to pay a
+     reference it observed — the reference is not a secret — but only the
+     first successful capture ever moves money, by construction of the
+     unique constraint plus the transactional insert below.)
+5. Payer's available balance is checked against `amountSatoshis`
+   (mirroring `WithdrawalService.create`'s exact check) — insufficient
+   balance is `422`, funds never move.
+6. On success: one balanced ledger transaction posts `payer -amount` /
+   `payee +amount` via `SettlementEngine.transferInternal` (see below),
+   using a *deterministic* idempotency key derived from `(payee,
+   paymentReference)` — not the caller's own `idempotencyKey` — so the
+   underlying ledger post is naturally deduplicated even if two HTTP
+   calls for the same reference race with different client-chosen keys.
+   This is the same "derive a deterministic sub-key" discipline
+   `WithdrawalService` already uses for its reservation id.
+7. The `authorizations` row is inserted with `state = 'CAPTURED'` in the
+   same step, `ON CONFLICT DO NOTHING` against either unique constraint —
+   whichever caller's insert loses a race reads back the row that won
+   and applies rule 4 above.
+
+### Duplicate-payment and expiry behavior, stated precisely
+
+| Situation | Result |
+|---|---|
+| Same payer retries (same or different `idempotencyKey`) after success | Same captured result returned again, no new ledger transaction |
+| A different principal also tries to pay an already-captured reference | `409 ALREADY_PAID_BY_OTHER`, no funds move |
+| `expiresAt` has passed and it was never captured | `410`, no funds move (checked live at call time — there is no separate background sweep in v1, matching deposit-intents' own lazy-expiry style in `pollOnce`) |
+| Insufficient payer balance | `422`, no funds move, no row is created |
+| Payee tries to pay its own challenge | `422`, no funds move |
+
+There is deliberately **no proof-expiry window separate from the
+challenge's `expiresAt`**: once captured, the transfer is final (custodial
+ledger, no chargebacks) and the resulting proof remains presentable
+indefinitely for its one intended redemption. This is a real scope
+boundary, not an oversight — see "Who enforces single delivery" below.
+
+### Signed proof (BitAI Payment -> payer, forwarded by payer -> payee)
+
+```ts
+interface BitaiPay402Proof {
+  proofId: string;
+  schemaVersion: 1;
+  protocol: "bitai-pay-402/1";
+  paymentReference: string;
+  resourceRef: string;
+  payerPrincipalId: string;
+  payeePrincipalId: string;
+  amountSatoshis: string;
+  asset: "BAIC_TEST" | "BAIC";
+  ledgerTransactionId: string;
+  authorizationId: string;
+  capturedAt: string;
+  issuedAt: string;
+  scopeNote: string; // literal field, same discipline as §7's CustodySettlementReceipt.scopeNote:
+                      // "This proof attests that payment was captured from payerPrincipalId to
+                      //  payeePrincipalId, bound to this exact paymentReference and resourceRef.
+                      //  It authorizes exactly one resource grant for that reference; the payee
+                      //  is solely responsible for rejecting any repeated presentation of it."
+}
+interface SignedBitaiPay402Proof {
+  proof: BitaiPay402Proof;
+  signature: string;      // Ed25519 hex over canonicalize(proof) — §4/§7's one shared primitive
+  signingKeyId: string;   // the SAME key/id as Custody Settlement Receipts; not a second keypair
+}
+```
+
+Deliberately **not** a `CustodySettlementReceipt` (§7) reusing that type:
+the two attestations have opposite scoping goals on purpose.
+`CustodySettlementReceipt.scopeNote` exists specifically to *deny*
+correlation to any individual transaction. `BitaiPay402Proof` exists
+specifically to *assert* correlation to one exact resource/reference —
+that is its entire job. Conflating them would silently weaken one or the
+other's honesty; keeping them as two distinct signed artifact types,
+sharing only the Ed25519 key/signing infrastructure, is the correct
+generalization of §7's "kept honestly separate" principle to a second
+use case, not an exception to it.
+
+### Payee verification rules (performed entirely by the payee, offline)
+
+The payee never needs to call BitAI Payment on the hot path. In order:
+
+1. Decode `X-Bitai-Pay402-Proof` and check `protocol === "bitai-pay-402/1"`, `schemaVersion === 1`.
+2. Verify the Ed25519 signature over `canonicalize(proof)` against BitAI
+   Payment's published public key for `signingKeyId` — the exact same
+   offline check §7 already establishes for receipts, reused unchanged.
+3. `proof.payeePrincipalId === (the payee's own principal id)`.
+4. `proof.resourceRef === (the resourceRef the payee itself minted for
+   this exact request)` — byte-for-byte. This is what makes "a receipt
+   for one API call cannot authorize another": the binding is checked by
+   the payee, using a value only the payee ever chose, never by BitAI
+   Payment, which has no opinion on what a resourceRef means.
+5. `proof.amountSatoshis` / `proof.asset` meet the payee's own price for
+   `resourceRef`.
+6. `proof.paymentReference` has not already been redeemed, per the
+   **payee's own** local record.
+7. Only if 1–6 all pass: record `paymentReference` as redeemed, then
+   serve the resource.
+
+An optional, non-hot-path secondary check — `GET
+/v1/authorizations/:id` (authenticated as the payee) — exists for
+reconciliation/audit, confirming BitAI Payment's own record agrees; nothing
+above depends on it.
+
+### Who enforces single delivery of the resource — a deliberate split
+
+BitAI Payment's guarantee (enforced by the unique constraint in rule 3
+above) is narrower than "the resource was only ever delivered once": it
+is **"the funds for this reference were only ever captured once."** Rule
+6 above — never re-serving a resource for an already-redeemed reference —
+is the *payee's* responsibility, using its own local state, exactly the
+same division of labor as any other payment system: a merchant, not the
+payment processor, is responsible for not shipping the same paid order
+twice. Centralizing rule 6 inside BitAI Payment (a `redeem` endpoint,
+say) was considered and rejected for v1: it would make BitAI Payment
+responsible for a fact about the payee's own application (has this
+resource been delivered yet?) that it has no way to verify independently
+and no legitimate need to know, worsening exactly the
+correlation/scope-creep problem §7 was written to avoid.
+
+### `SettlementEngine`, now minimally real
+
+§11 sketched a `SettlementEngine` interface as a design seam but no
+implementation of it exists anywhere in this codebase before this
+change — `DepositService`/`WithdrawalService` both call `LedgerService`
+directly. This feature introduces the first real, deliberately
+minimally-scoped implementation:
+
+```ts
+interface SettlementEngine {
+  transferInternal(request: InternalTransferRequest): Promise<SettlementResult>;
+}
+```
+
+`CustodialLedgerEngine implements SettlementEngine` wraps
+`LedgerService.post()` directly — v1's "instant" behavior needs no
+reservation step at the ledger layer, unlike a withdrawal, because there
+is no external (on-chain) uncertainty to reserve against; both legs of
+the transfer are already-custodied balances moving atomically in one
+database transaction. `AuthorizationService` depends on
+`SettlementEngine`, never on `LedgerService` directly, so a future
+`ChannelSettlementEngine implements SettlementEngine` — routing
+`transferInternal` through a bilateral channel when one is open — can be
+swapped in via dependency injection alone, with **zero changes** to
+`AuthorizationService`, the HTTP routes, or the Challenge/Proof wire
+formats. `DepositService`/`WithdrawalService` are deliberately **not**
+retrofitted onto this interface in this change — doing so is unrequested,
+broader-than-asked scope, and is left as clearly-identified future work,
+not silently done or silently skipped.
+
+### New data (migration `0006_authorizations.sql`)
+
+```sql
+CREATE TYPE authorization_state AS ENUM ('CAPTURED', 'VOIDED', 'EXPIRED');
+-- No HELD state is persisted in v1 (see "auto-capture" above) — the
+-- enum leaves room for a future version that needs a real hold window
+-- (e.g. metered billing, capturing less than the held amount) to add one
+-- without a breaking migration.
+
+CREATE TABLE authorizations (
+  id text PRIMARY KEY,
+  idempotency_key text NOT NULL UNIQUE,
+  payer_principal_id text NOT NULL REFERENCES principals(id),
+  payee_principal_id text NOT NULL REFERENCES principals(id),
+  payer_account_id text NOT NULL REFERENCES accounts(id),
+  payee_account_id text NOT NULL REFERENCES accounts(id),
+  payment_reference text NOT NULL,
+  resource_ref text NOT NULL,
+  amount_satoshis bigint NOT NULL CHECK (amount_satoshis > 0),
+  currency settlement_currency NOT NULL,
+  state authorization_state NOT NULL DEFAULT 'CAPTURED',
+  capture_ledger_transaction_id text NOT NULL REFERENCES ledger_transactions(id),
+  expires_at timestamptz NOT NULL,
+  captured_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (payee_principal_id, payment_reference)
+);
+```
+
+### What this does not do (explicitly out of scope for v1, matching the request)
+
+- No bilateral channels, no HTLCs — `CustodialLedgerEngine` only.
+- No BitAIcoin consensus changes, no wallet behavior changes — this
+  entire feature lives inside BitAI Payment's own database and HTTP
+  surface.
+- No marketplace dependency anywhere in this section's code path.
+- No self-service principal registration — the demo's two principals are
+  provisioned via the existing operator CLI
+  (`pnpm principals:register`), exactly like every other principal.
+- No partial capture, no merchant-triggered capture-after-delivery — both
+  remain possible future extensions of the same `authorizations` table
+  and `SettlementEngine` seam, not designed further here.
+
+### The acceptance test
+
+Two independent `INDIVIDUAL` principals (a payer agent and a
+service/payee), each with a real funded `BAIC_TEST` account (funded
+through §8's ordinary deposit-intent flow against a fake chain — no live
+BitAIcoin node is needed for this feature, since v1 never touches
+BitAIcoin at all). Three real, independently-listening HTTP servers
+(BitAI Payment itself, a demo protected-resource service, and a payer
+client issuing real `fetch()` calls) proving the full flow above end to
+end: unpaid request → real `402` → real signed authorize/capture call →
+real Ed25519-verified proof → resource served on retry → replayed proof
+on a second retry is rejected by the payee without needing to ask BitAI
+Payment again → a second payer attempting to pay the same, already-
+captured `paymentReference` is refused by BitAI Payment with no funds
+moving.
+
+---
+
 ## What duplicates existing functionality (and should not be built twice)
 
 1. **Authorization/capture for marketplace contracts** — fully provided
    by the marketplace's own Mandate → Escrow → Release/Refund pipeline.
-   BitAI Payment's `/v1/authorizations` is for direct, non-marketplace
-   L402 use only (§13) — never re-invoked per marketplace contract, and
-   structurally cannot be under the omnibus model, since BitAI Payment
-   has no notion of "a contract" to hold funds against.
+   BitAI Payment's `/v1/authorizations` (implemented, §15, as "BitAI
+   Pay-402" — deliberately not called "L402", see §15) is for direct,
+   non-marketplace use only (§13) — never re-invoked per marketplace
+   contract, and structurally cannot be under the omnibus model, since
+   BitAI Payment has no notion of "a contract" to hold funds against.
 2. **Idempotency infrastructure** — the marketplace's own idempotency-
    lease system (ADR-0093) is separate from BitAI Payment's; the
    marketplace's `PaymentAdapter` idempotency key *becomes* BitAI
@@ -893,3 +1222,14 @@ unrelated time.
 - **HD wallet vs. per-address `getnewaddress` calls** — an
   implementation detail of `CustodialLedgerEngine`, left open since it
   doesn't affect anything above the `SettlementEngine` line.
+- **Migrating `DepositService`/`WithdrawalService` onto the
+  `SettlementEngine` interface** — §15 introduces the first real
+  implementation of that interface, scoped to `transferInternal` only;
+  deposits and withdrawals still call `LedgerService` directly. Whether
+  they should move onto the same seam is a real future question, not
+  decided or assumed here.
+- **Individual-principal self-service registration for direct HTTP-402
+  use** — §15's demo provisions its two principals via the existing
+  operator CLI, same as above; a real facilitator/marketplace-style
+  onboarding flow for arbitrary third-party payers and payees is not
+  designed here.
