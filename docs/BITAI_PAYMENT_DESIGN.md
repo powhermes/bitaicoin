@@ -1,19 +1,29 @@
 # BitAI Payment — Design (Not Implemented)
 
-Status: **Design only. No production code exists yet**, per explicit instruction.
-This document is the deliverable `docs/AGENT_PAYMENTS.md` called for: "a
-dedicated design/plan phase... informed by whatever real usage patterns or
-requirements emerge from actually running the Phase 1 Synthetic Lab network."
+Status: **Design only. No production code exists yet**, per explicit
+instruction. This document is the deliverable `docs/AGENT_PAYMENTS.md`
+called for: "a dedicated design/plan phase... informed by whatever real
+usage patterns or requirements emerge from actually running the Phase 1
+Synthetic Lab network."
+
+**Revision note (this version):** amended after review to fix four issues
+before implementation begins — a double-ledger ownership bug, a missing
+authentication/authorization model, an unverified claim about BitAIcoin
+RPC idempotency (corrected against the actual v31.1 fork), and a
+conflation of two genuinely different attestations. Each is called out
+where it changes prior content, rather than silently rewritten, so the
+reasoning stays auditable. Nothing below assumes consensus changes;
+`BitAIcoin Core` remains a narrow settlement/monetary layer throughout.
 
 Grounded directly against the existing `agent-marketplace` codebase
-(`~/Desktop/Projects/agent-marketplace`, reviewed file-by-file for this
-design — `packages/core/src/payments/payment-adapter.ts`,
+(`~/Desktop/Projects/agent-marketplace`, reviewed file-by-file —
+`packages/core/src/payments/payment-adapter.ts`,
 `packages/core/src/payments/adapter-conformance.ts`,
 `packages/contracts/src/entities/payments.ts`,
 `apps/api/src/modules/payments/base-usdc-adapter.ts`,
-`packages/db/src/schema/tables.ts`, and the payments/architecture docs), not
-from generic knowledge of what a payment adapter "should" look like. Every
-interface reproduced below is copied from that code, not paraphrased.
+`packages/db/src/schema/tables.ts`), and against this repo's actual RPC
+surface (verified live against a running `bitaicoind -chain=regtest` for
+this revision — see §8's withdrawal redesign).
 
 ## Target architecture (as specified)
 
@@ -23,12 +33,6 @@ Agent Marketplace
   -> BitAI Payment              (a new, separate service — this document's main subject)
   -> BitAIcoin Core / RPC       (this repo — narrow settlement layer, no new consensus features)
 ```
-
-BitAIcoin Core's role in this design is **read/write RPC client only**:
-`getnewaddress`, `listtransactions`, `gettransaction`, `listunspent`,
-`sendtoaddress`/`send`, `getblockcount`, `getblockhash`. All already exist,
-unmodified, as stock Bitcoin Core RPCs. Nothing in this design requires a new
-opcode, a new RPC, or a new consensus rule.
 
 ---
 
@@ -62,7 +66,7 @@ Supporting types (from `packages/contracts/src/entities/payments.ts`):
 - `RailFinality = "NONE" | "PROVISIONAL" | "FINAL" | "REVERSED"`. Only `FINAL` may credit a ledger (`mayCreditLedger()`, ADR-0101).
 - `RailTransferStatus { externalReference, state, finality, observedAmount, failureClass, failureReason, observedAt, detail, observation? }`.
 - `RailObservation { externalReference, finality, observedAt, provider: { name, agreement }, provenance: Record<string, string|number|null> }` — durable, chain-specific evidence (ADR-0127). `provenance` is opaque to marketplace code; this is where every BitAIcoin-specific fact (txid, vout, block height, block hash) lives.
-- `ExternalAsset` enum currently: `MOCK_USD | USDC | USDC_SEPOLIA | BTC | HBAR | FIAT_USD`. **`BAIC` and `BAIC_TEST` do not exist yet and must be added** (see §11).
+- `ExternalAsset` enum currently: `MOCK_USD | USDC | USDC_SEPOLIA | BTC | HBAR | FIAT_USD`. **`BAIC` and `BAIC_TEST` do not exist yet and must be added** (see §12).
 - `SettlementCurrency` enum currently: `USD | USDC_TEST`. **`BAIC_TEST` must be added**, mirroring exactly how `USDC_TEST` is kept structurally isolated from `USD` (ADR-0113) — a testnet/lab-chain BAIC balance must never be reachable from a USD-denominated mandate, quote, or contract.
 
 ### The conformance suite (`packages/core/src/payments/adapter-conformance.ts`)
@@ -70,8 +74,8 @@ Supporting types (from `packages/contracts/src/entities/payments.ts`):
 Every assertion `BitaiPaymentAdapter` must pass, verbatim from the file:
 
 1. Declares capabilities; `supportedAssets`/`supportedNetworks` non-empty; `handlesRealValue` is a boolean.
-2. `supportsQueryByIdempotencyKey` is `true` (this is asserted directly — it is not optional for any adapter).
-3. Declares `initiatesTransfers` honestly; if `false`, `submitTransfer` must throw `UNSUPPORTED`. **BitaiPaymentAdapter must declare `true`** (unlike `BaseUsdcAdapter`) because it needs to originate withdrawals — see §2.
+2. `supportsQueryByIdempotencyKey` is `true` (asserted directly — not optional for any adapter).
+3. Declares `initiatesTransfers` honestly; if `false`, `submitTransfer` must throw `UNSUPPORTED`. **BitaiPaymentAdapter declares `true`** (unlike `BaseUsdcAdapter`) because it originates withdrawals.
 4. Submitting the same `idempotencyKey` two or three times returns the *same* `externalReference` every time.
 5. `reconcileByIdempotencyKey` on a never-seen key returns `null` — not an error.
 6. `submitTransfer`'s result has a `state` in the enum and a `finality` in the enum, and `observedAt` is set.
@@ -82,8 +86,7 @@ Every assertion `BitaiPaymentAdapter` must pass, verbatim from the file:
 11. A terminal transfer stays terminal across repeated queries (same `state`, same `externalReference`).
 12. Distinct keys produce distinct transfers.
 
-This suite is framework-agnostic and reusable — `BitaiPaymentAdapter`'s own
-test file runs it exactly the way `base-usdc-adapter.test.ts` does, with a
+`BitaiPaymentAdapter`'s own test file runs this exact suite, with a
 `ConformanceHarness` whose `settle()` hook mines a lab-chain block (or waits
 for the configured confirmation depth) and whose `loseResponseFor()` hook
 simulates a dropped HTTP response between the marketplace and BitAI Payment.
@@ -93,38 +96,45 @@ simulates a dropped HTTP response between the marketplace and BitAI Payment.
 ## 2. Proposed `BitaiPaymentAdapter` — mapping marketplace operations to BitAI Payment
 
 `BitaiPaymentAdapter` lives in the marketplace repo
-(`apps/api/src/modules/payments/bitai-payment-adapter.ts`) and is a **thin
-HTTP client**, structurally the same role `BaseUsdcAdapter` plays over an
-`EvmRpcClient` — except the thing it talks to is BitAI Payment's own API
-(§3), not a chain RPC directly. BitAI Payment is what talks to BitAIcoin
-Core.
+(`apps/api/src/modules/payments/bitai-payment-adapter.ts`) and is a **thin,
+authenticated HTTP client** — structurally the same role `BaseUsdcAdapter`
+plays over an `EvmRpcClient`, except the thing it talks to is BitAI
+Payment's own API (§3), not a chain RPC directly.
+
+**Account model (fixes the double-ledger issue — see the design note
+below the table).** Every call `BitaiPaymentAdapter` makes is authenticated
+as a single **tenant principal** representing the whole marketplace
+deployment (§4). It never passes, and BitAI Payment never accepts, an
+individual agent identifier as the thing that determines fund ownership.
+All marketplace-originated value lives in **one omnibus account per
+currency**, owned by the marketplace's tenant principal.
 
 | PaymentAdapter method | Maps to |
 |---|---|
-| `railId` | `"bitaicoin-lab"` while on the Phase 1 Synthetic Lab chain; `"bitaicoin"` once a production chain exists. Distinct strings on purpose, mirroring how `BASE_SEPOLIA_RAIL_ID` is distinct from a hypothetical mainnet one — a deployment must not be able to point a lab-rail-configured marketplace at a real-value rail by accident. |
+| `railId` | `"bitaicoin-lab"` while on the Phase 1 Synthetic Lab chain; `"bitaicoin"` once a production chain exists. Distinct strings on purpose — a deployment must not be able to point a lab-rail-configured marketplace at a real-value rail by accident. |
 | `capabilities()` | See table below. |
-| `submitTransfer(request)` — `purpose: "WITHDRAWAL"` | `POST /v1/withdrawals` on BitAI Payment, passing the marketplace's `idempotencyKey` through as BitAI Payment's own idempotency key (never regenerated — this is the one identifier that must survive the whole chain). |
-| `submitTransfer(request)` — `purpose: "DEPOSIT"` | **Refuses with `UNSUPPORTED`.** A deposit is not "submitted" — see the deposit-intent flow in §7. `submitTransfer` is only ever called by the marketplace for outbound value (withdrawals), matching how `TransferRequest.purpose` is used elsewhere in the marketplace. |
-| `getTransfer(externalReference)` | `GET /v1/transfers/{externalReference}` |
-| `reconcileByIdempotencyKey(key)` | `GET /v1/transfers/by-idempotency-key/{key}` — the mandatory recovery path |
-| `finalityOf(status)` | Pure pass-through of `status.finality`. BitAI Payment normalizes finality itself (§7) before ever returning a status to the adapter — the adapter does not compute anything. |
-| `verifyCallback(payload, sig)` | Verifies BitAI Payment's webhook signature (Ed25519 or HMAC — §6 reuses the same Ed25519 key/verification the marketplace already uses for agent auth, ADR-0011, rather than introducing a second crypto primitive). Per ADR-0104, a verified callback still only triggers a re-query (`reconcileByIdempotencyKey`) — it never credits directly. |
+| `submitTransfer(request)` — `purpose: "WITHDRAWAL"` | `POST /v1/withdrawals`, authenticated as the marketplace tenant, debiting the tenant's own omnibus account, paying out to `request.instrument.reference` (an external address the marketplace itself supplies — e.g. the withdrawing agent's own wallet). BitAI Payment never learns or needs to know which agent this is for. |
+| `submitTransfer(request)` — `purpose: "DEPOSIT"` | **Refuses with `UNSUPPORTED`.** A deposit is not "submitted" — see §8. |
+| `getTransfer(externalReference)` | `GET /v1/transfers/{externalReference}`, authenticated, scoped to the tenant's own transfers. |
+| `reconcileByIdempotencyKey(key)` | `GET /v1/transfers/by-idempotency-key/{key}` — the mandatory recovery path. |
+| `finalityOf(status)` | Pure pass-through of `status.finality`. |
+| `verifyCallback(payload, sig)` | Verifies BitAI Payment's webhook signature (§4). Per ADR-0104, a verified callback still only triggers a re-query — it never credits directly. |
 
 ### Capabilities declaration
 
 ```ts
 capabilities(): AdapterCapabilities {
   return {
-    initiatesTransfers: true,       // unlike BaseUsdcAdapter: BitAI Payment holds custody and can send
+    initiatesTransfers: true,
     supportsDeposits: true,
     supportsWithdrawals: true,
-    supportsRefunds: true,          // pre-capture refunds are pure off-chain ledger moves inside BitAI Payment
-    supportsMicropayments: true,    // the whole point of the internal-transfer/instant-payment layer
+    supportsRefunds: true,
+    supportsMicropayments: true,
     supportsMemo: true,
-    supportsNativeIdempotency: false, // BitAIcoin/Bitcoin Core RPC has none (see §7); BitAI Payment supplies it
-    supportsQueryByIdempotencyKey: true, // mandatory, satisfied
+    supportsNativeIdempotency: false, // BitAIcoin/Bitcoin Core RPC has none (see §8); BitAI Payment supplies it
+    supportsQueryByIdempotencyKey: true,
     supportsFinality: true,
-    supportsCallbacks: true,        // BitAI Payment is a service we operate and can push webhooks from
+    supportsCallbacks: true,
     supportedAssets: ["BAIC_TEST"], // ["BAIC"] once a production chain exists — never both from one adapter instance
     supportedNetworks: ["bitaicoin-lab"],
     handlesRealValue: false,        // true only once BitAI Payment points at a real-value BitAIcoin chain
@@ -132,88 +142,191 @@ capabilities(): AdapterCapabilities {
 }
 ```
 
-`handlesRealValue: false` on the lab chain is load-bearing the same way
-`assertSepoliaOnly()` is load-bearing for `BaseUsdcAdapter` (ADR-0117):
-**a config error must not be able to make this silently become `true`.**
-§9 specifies the equivalent hard guard.
+### Design note: why an omnibus account, not per-agent BitAI Payment accounts
 
-### The deposit-attribution question (mirrors Base's hardest problem)
+The original version of this design had BitAI Payment attribute each
+deposit to the depositing agent's *own* BitAI Payment account, while the
+marketplace *separately* tracked that same agent's balance in its own
+`BAIC_TEST` ledger. That is two systems of record for one ownership fact,
+and they diverge the moment escrow moves ownership: the marketplace's own
+ledger reassigns buyer → seller entirely internally (correctly — "escrow
+funding moves value between two internal accounts and involves no adapter
+at all" is already how every existing rail works), but BitAI Payment would
+never be told, and would still believe the *buyer* owns the funds when the
+*seller* later tries to withdraw them.
 
-`BaseUsdcAdapter`'s biggest design cost was attributing an arriving transfer
-to the right intent (`DepositExpectation`, `SENDER_PROOF` vs
-`UNIQUE_ADDRESS`, ADR-0123/ADR-0130). BitAIcoin inherits this exact problem
-in UTXO form, and the same resolution applies directly: **use
-`UNIQUE_ADDRESS` attribution, not `SENDER_PROOF`.**
+The fix is the standard pattern for exactly this shape of problem (it's
+how a real custodian handles an institutional client, not a novel
+invention): **BitAI Payment is authoritative for aggregate custody
+belonging to the marketplace; the marketplace remains authoritative for
+who, inside that aggregate, owns what.** BitAI Payment tracks one number
+(the marketplace's total BAIC_TEST at BitAI Payment); the marketplace's
+own ledger — already proven, already audited, already the place Mandates
+and Escrow live — tracks the rest. No second ownership ledger exists to
+disagree with the first.
 
-- BitAI Payment allocates one freshly-derived BitAIcoin address per deposit
-  intent (`getnewaddress` or an internally-managed HD descriptor — §7).
-- Nothing arrives at that address except the deposit it was created for, so
-  attribution needs no sender-control proof at all — simpler than Base's
-  worst case, not harder, because UTXO outputs don't share an account the
-  way EVM balances do.
-- Overpayment/underpayment policy mirrors ADR-0130 exactly: underpayment
-  never confirms (funds sit visibly, not silently dropped); overpayment
-  confirms the intent at its declared amount and the surplus is a distinct,
-  separately-reconcilable UTXO at the same address (an operator-visible
-  reconciliation finding, not silently swept in).
+Direct, non-marketplace BitAI Payment users (§13's note on the standalone
+L402 use case) still get individual accounts, because there is no
+marketplace ledger standing behind them to be the second source of truth.
 
 ---
 
 ## 3. The BitAI Payment service boundary and API
 
 A new, separate deployable — not part of this repo, not part of the
-marketplace monorepo. Language/framework is the user's call; reusing the
-marketplace's own stack (TypeScript, Fastify, PostgreSQL, Drizzle) is a
-reasonable default only because it avoids introducing a second stack for
-one team to operate, not because anything here requires it.
+marketplace monorepo. Every endpoint below requires the authentication
+described in §4; none of them accept a caller-supplied account ID that
+isn't first checked against the authenticated principal's own ownership.
 
 ```
-POST   /v1/deposit-intents              { idempotencyKey, expectedAmount, asset, ownerRef }
+POST   /v1/deposit-intents              { idempotencyKey, expectedAmount, asset, memo? }
                                          -> { depositAddress, expiresAt, fromHeight }
+                                         Credits the AUTHENTICATED PRINCIPAL's own account
+                                         (its omnibus account, if a TENANT). No ownerRef parameter exists.
 
 GET    /v1/transfers/{externalReference}
 GET    /v1/transfers/by-idempotency-key/{key}
                                          -> RailTransferStatus-shaped JSON (§1's exact shape)
+                                         Scoped to transfers the caller's own account was party to.
 
 POST   /v1/withdrawals                  { idempotencyKey, amount, asset, destinationAddress, memo? }
                                          -> RailTransferStatus | 202 UNKNOWN_OUTCOME-equivalent
+                                         Debits the AUTHENTICATED PRINCIPAL's own account.
 
-POST   /v1/internal-transfers           { idempotencyKey, fromAccount, toAccount, amount, asset }
-                                         -> instant, off-chain, no BitAIcoin transaction at all
+POST   /v1/internal-transfers           { idempotencyKey, toAccountId, amount, asset }
+                                         -> instant, off-chain, no BitAIcoin transaction
+                                         `toAccountId` is a destination the caller names; the SOURCE is
+                                         always the caller's own account, never a parameter.
 
-POST   /v1/authorizations               { idempotencyKey, amount, asset, payerAccount, resourceRef }
-                                         -> { authorizationId, holdExpiresAt }        [direct/non-marketplace L402 use — see §12's note]
-POST   /v1/authorizations/{id}/capture  { amount? }   (defaults to full authorized amount)
+POST   /v1/authorizations               { idempotencyKey, amount, asset, resourceRef }
+                                         -> { authorizationId, holdExpiresAt }
+                                         Direct/non-marketplace L402 use only — see §13's note. Holds
+                                         against the AUTHENTICATED PRINCIPAL's own account.
+POST   /v1/authorizations/{id}/capture  { amount? }
 POST   /v1/authorizations/{id}/void
 
 GET    /v1/challenges/{resourceRef}     -> HTTP-402-shaped payment requirement (amount, asset, address/invoice, expiry)
-                                            [BitAI Payment's own negotiation endpoint for direct L402 flows]
 
 POST   /v1/receipts/verify              { receipt, signature } -> { valid: boolean, reason? }
-                                            [convenience only — primary verification is offline, §6]
+                                         [convenience only — primary verification is offline, §7]
 
-GET    /v1/accounts/{accountId}/balance -> { available, pending, currency }
+GET    /v1/accounts/me/balance          -> { available, pending, currency }
+                                         Deliberately "me", not "/accounts/{id}" — see §4: there is no
+                                         endpoint that takes an arbitrary account id as a path parameter
+                                         for anything but a reference already scoped to the caller.
 
 GET    /v1/rail-status                  -> chain reachability, head height, confirmation depth, handlesRealValue
-POST   /v1/reconcile                    -> operator-triggered reconciliation sweep (read-only findings, §7)
+POST   /v1/reconcile                    -> operator-only, separately authenticated (§4), read-only findings
 
 Webhook (BitAI Payment -> subscriber):
-POST   {subscriber_webhook_url}         RailCallbackEnvelope-shaped body (railId, externalReference,
-                                          claimedState, signature, emittedAt, nonce) — a hint, per ADR-0104
+POST   {webhook URL configured at onboarding — never a runtime parameter, §4}
+                                         RailCallbackEnvelope-shaped body — a hint, per ADR-0104
 ```
-
-All amounts are decimal strings, matching `TransferRequest.amount` exactly —
-no floats anywhere in this boundary, same reasoning as the existing contract
-(a satoshi amount is an integer; a float would eventually lie about one).
 
 ---
 
-## 4. The internal payment state machine
+## 4. Authentication, authorization, anti-replay, and webhook destination policy
+
+Not present in the prior version of this design. Added because "no caller
+should be able to withdraw, transfer from, query, or authorize against an
+arbitrary account merely by supplying its ID" is a hard requirement, and
+the prior draft implicitly allowed exactly that by accepting account/owner
+identifiers as untrusted request parameters.
+
+### Principals
+
+Two kinds, and every account has exactly one owner:
+
+| Principal kind | Example | Owns |
+|---|---|---|
+| `TENANT` | the agent marketplace deployment | exactly its own omnibus account(s), one per currency |
+| `INDIVIDUAL` | a direct, non-marketplace L402 payer | exactly its own individual account |
+
+A principal is provisioned **out-of-band** (an operator action — for the
+single-tenant Phase 1 case this can literally be a config entry; it does
+not need a self-service signup flow to be correct). Provisioning records:
+`principalId`, `kind`, its Ed25519 **public** key, and (for a `TENANT`) its
+webhook URL. BitAI Payment never possesses or transmits a principal's
+private key.
+
+### Request authentication
+
+Every API call (not just webhooks) carries a signed envelope, deliberately
+reusing the same shape and the same primitive already established for
+receipts (§7) and already used by the marketplace itself for agent
+authentication (ADR-0011) — one cryptographic scheme for the whole system,
+not a second one invented for this boundary:
+
+```
+Headers:
+  X-Bitai-Principal:  <principalId>
+  X-Bitai-Timestamp:  <unix ms>
+  X-Bitai-Nonce:      <opaque, unique per principal, e.g. a UUID>
+  X-Bitai-Signature:  <Ed25519 signature, base64>
+
+Signed material (canonicalized, same discipline as receipt signing, §7):
+  method + "\n" + path + "\n" + sha256(body) + "\n" + timestamp + "\n" + nonce
+```
+
+Verification, in order, any failure is a `401`:
+
+1. The `principalId` is known and its public key resolves.
+2. `timestamp` is within a freshness window (e.g. ±60s) of BitAI Payment's
+   own clock.
+3. `(principalId, nonce)` has not been seen before within the freshness
+   window — a small, short-TTL store (the window is bounded, so this never
+   grows unbounded) rejects a replayed request even if the signature is
+   valid. This is the exact `emittedAt` + `nonce` anti-replay shape
+   `RailCallbackEnvelope` already uses for webhooks, applied here to
+   *inbound* requests as well.
+4. The Ed25519 signature verifies against the canonicalized material.
+
+### Authorization
+
+**The account is derived from the authenticated principal, not accepted as
+a caller-supplied parameter, wherever the operation is inherently
+"my account."** `GET /v1/accounts/me/balance`, `POST
+/v1/deposit-intents`, and `POST /v1/withdrawals`'s debited side all work
+this way — there is no `accountId` field for the caller to substitute
+someone else's account into. Where an operation *does* need to name a
+second account (`POST /v1/internal-transfers`'s `toAccountId`), that
+field only ever names a **destination**, never a source, and the
+destination is validated to exist and to accept the asset — it is never
+used to authorize taking money *from* it.
+
+A `TENANT` principal can never resolve to, query, or act on any
+`INDIVIDUAL` account, or another tenant's omnibus account, under any
+parameter combination — there is no code path that looks up an account
+by anything other than `(authenticated principal, currency)`.
+
+### Webhook destination policy
+
+A principal's webhook URL is part of its out-of-band provisioning record
+(above), never a value accepted from a routine, per-request API call.
+This closes two real risks with one rule: a compromised or careless
+caller cannot redirect another principal's notifications, and no runtime
+endpoint exists that could be used as an SSRF vector by supplying an
+internal or link-local URL. At provisioning time, the URL is validated to
+be `https://` and to resolve to a public, non-link-local, non-loopback
+address. Every webhook payload is itself signed (§7's Ed25519 discipline,
+same key infrastructure) — even a misdirected or intercepted webhook
+grants no capability on its own, consistent with ADR-0104's "a callback
+is a hint, never an instruction," which is unaffected by any of this.
+
+### What this does not cover (left open, §"genuinely open")
+
+Key rotation, individual-principal self-registration flow, and rate
+limiting per principal are real operational needs but are policy details
+that don't change the shape of anything above — deliberately deferred
+rather than guessed at here.
+
+---
+
+## 5. The internal payment state machine
 
 Three separate state machines, deliberately not fused — same reasoning as
 the marketplace keeping `PaymentIntentState` separate from every internal
-entity's own machine (external systems must not make an internal state
-depend on their own availability).
+entity's own machine.
 
 **Deposit intent:**
 ```
@@ -221,467 +334,540 @@ CREATED -> AWAITING_PAYMENT -> DETECTED -> CONFIRMING -> CONFIRMED
                              \                        \-> REORGED -> CONFIRMING (re-watch) | EXPIRED
                               \-> EXPIRED (nothing arrived in time)
 ```
-`DETECTED` = seen in a block or the mempool, 0+ confirmations, below the
-configured depth. `UNDERPAID` is not a separate state — it is `CONFIRMING`
-with an amount-mismatch note, per the Base precedent (§2); it can still
-resolve to `CONFIRMED` if a top-up UTXO arrives.
 
-**Withdrawal intent:**
+**Withdrawal intent** (revised — see §8 for why):
 ```
-CREATED -> RESERVED -> BROADCASTING -> BROADCAST -> CONFIRMING -> CONFIRMED
-                                     \-> UNKNOWN (crash mid-broadcast; never resend, always reconcile by label — §7/§8)
-        \-> FAILED (rejected before broadcast: bad address, insufficient funds) -> RELEASED
+CREATED -> RESERVED -> BUILDING -> SIGNED -> BROADCASTING -> BROADCAST -> CONFIRMING -> CONFIRMED
+                     \                     \-> UNKNOWN (bitcoind RPC call itself failed ambiguously;
+                      \-> FAILED             reconcile via persisted txid, never resend blindly — §8/§9)
+                       \-> RELEASED
 ```
-`RESERVED` mirrors the marketplace's own withdrawal reserve model
-(`AGENT_AVAILABLE -> EXTERNAL_PENDING`, ADR-0106) one layer down, inside
-BitAI Payment's own ledger: funds are neither spendable nor gone while the
-outcome is unknown.
+`SIGNED` is a new, explicit state: the point at which the fully-signed raw
+transaction and its deterministic `txid` are **durably persisted, before
+broadcast**. This is the anchor the whole recovery story hangs from — see
+§8.
 
-**Authorization hold** (direct/non-marketplace use only — §12's note):
+**Authorization hold** (direct/non-marketplace use only — §13's note):
 ```
 CREATED -> HELD -> CAPTURED (partial or full)
                  \-> VOIDED
                  \-> EXPIRED
 ```
 
-Normalization into the marketplace's own `PaymentIntentState` (`CREATED →
-SUBMITTED → PENDING → CONFIRMED / FAILED / REJECTED / UNKNOWN`) happens at
-the `BitaiPaymentAdapter` boundary, one direction only — BitAI Payment never
-learns the marketplace's state names, matching how `BaseUsdcAdapter` returns
-its own `RailTransferStatus.state` and the marketplace does the mapping.
+Normalization into the marketplace's own `PaymentIntentState` happens at
+the `BitaiPaymentAdapter` boundary, one direction only.
 
 ---
 
-## 5. The minimum ledger/data model
+## 6. The minimum ledger/data model
 
-BitAI Payment owns its own PostgreSQL database, structurally independent of
-the marketplace's. Adopting the marketplace's own proven ledger discipline
-(double-entry, append-only postings, balance-sums-to-zero enforced by a
-constraint, derived rather than stored balances) is **reuse of a pattern**,
-not duplication of a system — this ledger tracks BAIC custodial balances,
-a genuinely different thing from the marketplace's USD-denominated ledger.
+BitAI Payment owns its own PostgreSQL database, structurally independent
+of the marketplace's. Revised for the omnibus account model (§2):
 
 ```
-accounts                  (id, owner_ref, currency [BAIC | BAIC_TEST], created_at)
+accounts                  (id, owner_kind [TENANT_OMNIBUS | INDIVIDUAL], owner_principal_id UNIQUE per currency,
+                            currency [BAIC | BAIC_TEST], created_at)
+                           -- exactly one row per (owner_principal_id, currency); a TENANT's
+                           -- omnibus account is this table's only representation of "the marketplace's money" —
+                           -- there is no per-agent row here for marketplace-originated funds.
+
 ledger_transactions        (id, kind, idempotency_key UNIQUE, correlation_ref, created_at)
 ledger_postings            (id, transaction_id, account_id, amount, created_at)  -- append-only; trigger enforces sum(amount) = 0 per transaction_id
 
-deposit_intents            (id, idempotency_key UNIQUE, owner_ref, expected_amount, asset,
+deposit_intents            (id, idempotency_key UNIQUE, account_id, expected_amount, asset,
                              deposit_address UNIQUE, hd_index, from_height,
                              state, recorded_txid, recorded_vout, recorded_block_hash,
                              confirmations_last_seen, created_at, expires_at)
 
-withdrawal_intents         (id, idempotency_key UNIQUE, owner_ref, amount, asset,
-                             destination_address, state, broadcast_label,
-                             broadcast_txid, recorded_block_hash, fee_paid,
-                             created_at)
+withdrawal_intents         (id, idempotency_key UNIQUE, account_id, amount, asset,
+                             destination_address, state,
+                             built_psbt, signed_raw_hex, signed_txid,   -- persisted BEFORE broadcast (§8)
+                             locked_utxos_json,                        -- for lockunspent recovery (§8)
+                             recorded_block_hash, fee_paid, created_at)
 
-authorizations             (id, idempotency_key UNIQUE, payer_account_id, resource_ref,
+authorizations             (id, idempotency_key UNIQUE, account_id, resource_ref,
                              amount_held, amount_captured, state, expires_at)
 
 receipts                   (id, ledger_transaction_id, kind, payload_json, signature,
-                             signing_key_id, issued_at)
+                             signing_key_id, issued_at)   -- Custody Settlement Receipts only, §7
+
+principals                 (id, kind [TENANT | INDIVIDUAL], public_key, webhook_url, created_at)  -- §4
+request_nonces             (principal_id, nonce, seen_at)  -- short-TTL, bounded by the freshness window (§4)
 
 wallet_addresses           (address UNIQUE, hd_index, purpose, allocated_to_deposit_intent_id, created_at)
-
-webhook_deliveries         (id, subscriber_url, envelope_json, attempt_count, last_attempt_at, delivered_at)
-
-reconciliation_findings    (id, code, severity, detail_json, found_at, resolved_at)  -- read-only findings, no repair function (mirrors ADR-0090)
+webhook_deliveries         (id, principal_id, envelope_json, attempt_count, last_attempt_at, delivered_at)
+reconciliation_findings    (id, code, severity, detail_json, found_at, resolved_at)  -- read-only, no repair function (mirrors ADR-0090)
 ```
 
-Structural guarantees, mirroring the marketplace's own:
+Structural guarantees:
 
 | Constraint | Prevents |
 |---|---|
+| `UNIQUE(account_id, currency)` on `accounts` where `owner_kind = TENANT_OMNIBUS` | A second, competing omnibus account for the same tenant |
 | `UNIQUE(idempotency_key)` per intent table | Two intents for one intention |
 | `UNIQUE(deposit_address)` | Two intents sharing one destination |
 | `UNIQUE(recorded_txid, recorded_vout)` | Two intents claiming one UTXO |
+| `UNIQUE(signed_txid)` on `withdrawal_intents` where not null | Two intents believing they own one broadcast transaction |
 | Balanced-transaction trigger | A posting set that doesn't sum to zero |
-| One `ledger_transaction_id` per settled intent | Two credits for one confirmation |
+| Every write to `accounts`/`withdrawal_intents`/`deposit_intents` requires `account.owner_principal_id = authenticated principal` | The exact "arbitrary account by ID" risk §4 exists to close |
 
 ---
 
-## 6. The signed receipt format and verification procedure
+## 7. Two signed attestations, kept honestly separate
 
-A receipt is a canonical, deterministically-serialized JSON object signed
-with an **Ed25519** key — reusing the exact primitive the marketplace
-already uses for agent identity and challenge/response auth (ADR-0011),
-rather than introducing a second cryptographic stack for one feature.
+The prior version of this design had one receipt type and let the
+acceptance flow imply it proved a marketplace *contract* settled
+on-chain. That conflates two genuinely different facts, and the omnibus
+model (§2) makes the conflation impossible to sustain even if it were
+desired: **BitAI Payment has no visibility into individual marketplace
+contracts at all.** It sees one tenant's aggregate balance move. What
+"contract 12345 settled" means is a fact the marketplace's own ledger
+holds, not one BitAI Payment could truthfully attest to even if asked.
+
+### Custody Settlement Receipt (BitAI Payment issues this)
+
+Proves: **"BitAI Payment moved this much BAIC on or off BitAIcoin, into
+or out of this account's aggregate custody, at this txid, confirmed at
+this block."** Nothing more.
 
 ```ts
-interface BitaiPaymentReceipt {
+interface CustodySettlementReceipt {
   receiptId: string;
   schemaVersion: 1;
   kind: "DEPOSIT_SETTLED" | "WITHDRAWAL_SETTLED" | "INTERNAL_TRANSFER_SETTLED" | "AUTHORIZATION_CAPTURED";
-  payerRef: string;
-  payeeRef: string;
-  amount: string;          // decimal string, never a float
+  accountRef: string;       // the omnibus or individual account at BitAI Payment — never a marketplace agent id
+  amount: string;
   asset: "BAIC" | "BAIC_TEST";
   ledgerTransactionId: string;
-  externalReference: string | null;   // "bitaicoin:<txid>:<vout>" for on-chain settlements; null for pure internal transfers
-  chainAnchor: { blockHeight: number; blockHash: string } | null; // present only when externalReference is
-  settledAt: string;       // ISO-8601, BitAIcoin's own clock (block time) when chainAnchor is present
-  issuedAt: string;        // ISO-8601, BitAI Payment's own clock
+  externalReference: string | null;   // "bitaicoin:<txid>:<vout>" for on-chain settlements; null for internal transfers
+  chainAnchor: { blockHeight: number; blockHash: string } | null;
+  settledAt: string;
+  issuedAt: string;
+  scopeNote: "This receipt attests to aggregate custody movement only. It does not identify, and is not evidence of, any individual marketplace contract, task, or agent-to-agent transaction that the underlying balance may be associated with.";
 }
 ```
 
-**Signing:** canonicalize (sorted keys, no whitespace — the same discipline
-`packages/contracts`'s "canonical challenge payload" already uses) then sign
-the UTF-8 bytes with Ed25519. The signature and the `signingKeyId` (to
-support key rotation) travel alongside the payload, never inside it.
+`scopeNote` is a literal field, not just documentation — a receipt that
+carries its own honest limitation is harder to accidentally
+over-interpret downstream than one that relies on a reader having read
+this document.
 
-**Verification (the primary path is offline):**
-1. Recompute the canonical serialization of the payload.
-2. Verify the Ed25519 signature against BitAI Payment's published public
-   key for `signingKeyId`.
-3. Optionally, if `chainAnchor` is present, independently confirm
-   `blockHash` is what BitAIcoin itself reports at `blockHeight` (a fully
-   independent party can do this against their *own* `bitaicoin-cli`, with
-   zero trust in BitAI Payment at all — this is the concrete
-   machine-verifiability property the user's spec asked for).
+**Signing:** canonicalize (sorted keys, no whitespace) then sign with
+Ed25519 — the same key infrastructure §4 uses for request authentication.
+**Verification (primary path is offline):** recompute the canonical
+serialization, verify the signature against BitAI Payment's published
+public key for `signingKeyId`, and independently confirm `chainAnchor`
+against an independent `bitaicoin-cli`, with zero trust in BitAI Payment
+required for that last step.
 
-`POST /v1/receipts/verify` exists only as a convenience for a caller that
-doesn't want to implement step 1-2 itself; it is not the trust boundary.
+### Contract-Settlement Record (the marketplace issues this — BitAI Payment does not)
+
+This is not a new artifact. It **is** the marketplace's own existing
+internal ledger transaction plus its `CONTRACT_SETTLED` event — the same
+thing that already exists today for the mock rail and for Base Sepolia
+USDC. Proves: *"per the marketplace's own authoritative ledger, this
+contract's escrow released from buyer to seller."* It says nothing about
+whether, or when, any of that value has ever crossed a blockchain — under
+the omnibus model, escrow release is a pure internal bookkeeping event
+that happens with zero BitAI Payment involvement, exactly as it already
+does for every other rail.
+
+**A Custody Settlement Receipt is never, by itself, sufficient evidence
+that any particular marketplace contract settled — only the
+marketplace's own ledger record is.** The two attestations answer
+different questions and neither substitutes for the other; §14's
+acceptance test checks them separately for exactly this reason.
 
 ---
 
-## 7. Deposit, withdrawal, confirmation, and reorg behavior
+## 8. Deposit, withdrawal, confirmation, and reorg behavior
 
 ### Deposits
 
-1. `POST /v1/deposit-intents` allocates a fresh address (`getnewaddress` or
-   an internally-tracked HD descriptor index) and records
-   `from_height = getblockcount()` **before** anything else — this is the
-   same binding-boundary technique as `DepositExpectation.fromBlock`
-   (ADR-0122): a transfer at or before this height cannot be what this
-   intent is waiting for, closing off a replay of an old UTXO.
-2. A background poller calls `listtransactions`/`listunspent` for the
-   watched address and cross-checks against `gettransaction` for the
-   `confirmations` field BitAIcoin's own RPC already computes.
-3. **Independent block-hash tracking is still required**, not just trusting
-   `confirmations`: record the block hash at first observation
-   (`recorded_block_hash`), and on every later poll confirm the transaction
-   is still reported inside a block with that same hash. A reorg is
-   detected the moment it disagrees — exactly `evaluateFinality`'s reorg
-   check (§ design note below), not a new mechanism.
-4. Below the configured confirmation depth: `CONFIRMING`. At or above it:
-   `CONFIRMED`, and only then does BitAI Payment credit the owner's
-   off-chain ledger balance (mirrors "only `FINAL` may credit," ADR-0101,
-   one layer down).
-5. **Reorg:** if a previously-recorded `(txid, vout, blockhash)` triple is
-   no longer found in the canonical chain, do **not** immediately fail the
-   intent. Bitcoin-model reorgs commonly re-mine the same mempool
-   transaction within the next block or two; transition back to
-   `CONFIRMING` and keep watching. Only after a configured timeout with no
-   reappearance does the intent move to `FAILED`. This mirrors
-   `BaseUsdcAdapter.reconcileByIdempotencyKey`'s exact handling of "we
-   recorded a transfer that vanished."
+Unchanged from the prior version's design, now explicitly crediting the
+omnibus/individual account per §2 rather than a per-agent one:
 
-### Withdrawals
+1. `POST /v1/deposit-intents` allocates a fresh address and records
+   `from_height = getblockcount()` **before** anything else — the same
+   binding-boundary technique as `BaseUsdcAdapter`'s `fromBlock`
+   (ADR-0122).
+2. A background poller watches the address via `listunspent`/
+   `gettransaction`, independently tracking the block hash at first
+   observation (`recorded_block_hash`) rather than trusting
+   `confirmations` alone, so a reorg is detected the moment the reported
+   block hash disagrees with what was recorded — the same logical check
+   `evaluateFinality` makes for EVM (§ note below), reimplemented for
+   BitAIcoin's transaction model.
+3. Below the configured confirmation depth: `CONFIRMING`. At or above:
+   `CONFIRMED`, and only then is the account credited.
+4. **Reorg:** a previously-recorded `(txid, vout, blockhash)` that
+   disappears does not immediately fail the intent — it returns to
+   `CONFIRMING` and keeps watching, since Bitcoin-model reorgs commonly
+   re-mine the same mempool transaction within the next block or two.
+   Only a configured timeout with no reappearance moves it to `FAILED`.
+5. Attribution is `UNIQUE_ADDRESS` (one address per intent, mirroring
+   ADR-0130) — simpler than Base's account-model case, since UTXO outputs
+   don't share an address the way EVM balances share an account.
+   Underpayment never confirms; overpayment confirms at the declared
+   amount, leaving the surplus as a separately-reconcilable UTXO.
 
-Bitcoin Core RPC (and therefore BitAIcoin's, unmodified) has **no native
-request-level idempotency**: calling `sendtoaddress` twice sends twice.
-This is the one place BitAI Payment must build discipline the chain does
-not provide — but it is exactly the discipline the marketplace's own
-`PaymentAdapter` contract already demands, so there is no impedance
-mismatch, only implementation care:
+### Withdrawals — corrected against the actual fork's RPC behavior
 
-1. Write the `withdrawal_intents` row (state `RESERVED`, ledger posting
-   `AGENT_AVAILABLE -> EXTERNAL_PENDING`-equivalent inside BitAI Payment's
-   own accounts) and **commit it** before calling BitAIcoin at all.
-2. Call `sendtoaddress`/`send` with a `comment`/label parameter set to the
-   withdrawal's own idempotency key. The label is the recovery anchor.
-3. On success, record the returned `txid` and move to `BROADCAST`.
-4. **Crash between step 2 and step 3** (the RPC call succeeded but the
-   process died before persisting the result): on restart, **never
-   re-call `sendtoaddress`.** Instead, call `listtransactions` (or
-   `listlabels` + `listtransactions <label>`) filtering for the label and
-   recover the actual `txid` that way. This is the BitAIcoin-native
-   equivalent of `reconcileByIdempotencyKey`'s promise.
-5. Confirmation and reorg handling for a withdrawal's own transaction
-   mirror the deposit path exactly (§ above), tracked from BitAI Payment's
-   side rather than watched externally.
+**The prior version of this design was wrong, and the correction below
+is verified live against this repo's own build (`bitaicoind
+-chain=regtest`), not assumed.**
+
+`sendtoaddress`'s `comment`/`comment_to` parameters are, per the RPC's
+own help text, **"not part of the transaction, just kept in your
+wallet"** — pure local metadata. Worse, `listtransactions "label"`
+filters by a **label assigned to an address the wallet owns**, and only
+for the `"receive"` category — it cannot recover an outgoing send to an
+external destination at all, by comment or otherwise. There is no
+"search by comment" recovery path in Bitcoin Core's RPC, full stop, and
+the prior draft's claim that one existed was incorrect.
+
+**The actual, verified-available primitive is transaction determinism
+itself.** A fully-signed Bitcoin-model transaction's `txid` is fixed the
+moment it is finalized — Bitcoin Core signs deterministically (RFC 6979),
+so the same inputs signed with the same keys always produce the same
+signature and therefore the same `txid`, and nothing about broadcasting
+changes it. So: **build, sign, and compute the final txid entirely
+before ever calling `sendrawtransaction`, persist both durably, and
+recovery becomes "is this exact, already-known txid confirmed yet?" —
+never a search.**
+
+Verified-present RPCs this relies on (checked against this repo's own
+`bitaicoin-cli help <rpc>` output): `walletcreatefundedpsbt`,
+`walletprocesspsbt`, `finalizepsbt`, `decoderawtransaction`,
+`lockunspent` (with `persistent=true`, survives a restart),
+`sendrawtransaction`, `gettransaction`, `getrawtransaction`. All stock,
+unmodified Bitcoin Core RPCs — no new RPC and no consensus change.
+
+**The withdrawal flow:**
+
+1. Authenticate and authorize the request (§4); verify the account has
+   sufficient available balance; write a `withdrawal_intents` row
+   (`CREATED`), reserve the funds with a ledger posting to a pending
+   sub-balance, and **commit** — before BitAIcoin is touched at all.
+2. `walletcreatefundedpsbt` — let the wallet select inputs automatically.
+3. `lockunspent(unlock=false, <the selected inputs>, persistent=true)`
+   immediately, so a **concurrent** withdrawal request cannot select the
+   same UTXOs, and the lock survives a crash (persisted to the wallet
+   database) rather than evaporating on restart.
+4. `walletprocesspsbt(sign=true)` then `finalizepsbt(extract=true)` to
+   get the fully-signed `hex`. If `complete` is ever `false` for a
+   single-signer withdrawal wallet, unlock the inputs and retry from
+   step 2 — nothing has been broadcast, so this is free to redo.
+5. `decoderawtransaction(hex)` to read the deterministic `txid`.
+6. **Persist `signed_raw_hex` and `signed_txid` on the withdrawal_intents
+   row, move state to `SIGNED`, and commit — before step 7.** This is
+   the load-bearing durability point: the exact bytes that will be
+   broadcast exist in BitAI Payment's own database before they exist
+   anywhere else.
+7. `sendrawtransaction(hex)`:
+   - Accepted, or rejected as "already in the mempool" → `BROADCAST`.
+     Either answer means the same transaction exists on the network;
+     which of possibly several calls actually put it there is
+     irrelevant, because they are byte-identical.
+   - Rejected as "missing inputs" (our own inputs are already spent) →
+     query `getrawtransaction`/`gettransaction` on the persisted
+     `signed_txid`: if it is already confirmed, this is a **success
+     signal** from an earlier, crashed attempt whose response was lost —
+     move to `CONFIRMING`/`CONFIRMED` as appropriate, not to `FAILED`.
+   - Any other failure calling BitAIcoin itself (RPC unreachable, etc.)
+     → state stays `SIGNED` (the marketplace-facing equivalent of
+     `UNKNOWN_OUTCOME`). **Never resend a fresh `walletcreatefundedpsbt`
+     here** — the already-signed bytes are what must eventually be
+     broadcast, or nothing, never a second, differently-selected
+     transaction.
+8. Confirmation and reorg handling mirror the deposit path (§ above),
+   tracked from BitAI Payment's own side.
 
 ### A note on `evaluateFinality`
 
-`packages/core/src/payments/evm-finality.ts` is **not directly reusable** —
-its `receiptStatus: 0 | 1 | null` field encodes EVM transaction revert,
-which has no BitAIcoin/Bitcoin-model equivalent (a transaction inside a
-valid block is unconditionally valid; there is no "mined but reverted"
-state). The right move is a small, new, analogous function
+`packages/core/src/payments/evm-finality.ts` is **not directly
+reusable** — its `receiptStatus: 0 | 1 | null` field encodes EVM
+transaction revert, which has no BitAIcoin/Bitcoin-model equivalent (a
+transaction inside a valid block is unconditionally valid). The right
+move is a small, new, analogous function
 (`bitaicoin-finality.ts`, `BITAICOIN_FINALITY_POLICY_VERSION =
-"bitaicoin-confirmation-depth-v1"`) that reuses the exact same *logic*
-(confirmations = head − height + 1; reorg = recorded block hash ≠ current
-block hash; below depth = `PROVISIONAL`; at or above = `FINAL`) minus the
-revert check. Same pattern, new file — not a code fork, not a reinvention.
+"bitaicoin-confirmation-depth-v1"`) reusing the same *logic*
+(confirmations = head − height + 1; reorg = recorded block hash ≠
+current; below depth = `PROVISIONAL`; at or above = `FINAL`) minus the
+revert check. Same pattern, new file.
 
-**Confirmation depth is an open parameter, deliberately not specified
-here.** It depends on the still-open production security-model decision
-(`PHASE1_REPORT.md`'s Known Limitation on `PRODUCTION_DIFFICULTY_NOT_FINAL`)
-— a low-difficulty lab chain needs a *deeper* confirmation requirement to
-reach the same reorg-resistance a high-difficulty chain gets from a
-shallow one, not a shallower one, and picking a number now would be
-guessing at a decision this document explicitly defers.
+**Confirmation depth remains an open parameter**, deliberately not
+specified here — it depends on the still-open production security-model
+decision (`PHASE1_REPORT.md`'s `PRODUCTION_DIFFICULTY_NOT_FINAL`).
 
 ---
 
-## 8. Idempotency and crash/recovery behavior
+## 9. Idempotency and crash/recovery behavior
 
 The governing rule, restated one layer down from the marketplace's own
 (ADR-0100): **uncertainty causes reconciliation, never duplication.**
 
 | Crash point | Recovery |
 |---|---|
-| After the DB row commits, before BitAIcoin is called at all | Safe — nothing was sent. Retry for real. |
-| After BitAIcoin accepts a `sendtoaddress`, before the txid is persisted | **Never resend.** Recover via label lookup (§7). |
-| Mid-reconciliation read | Reconciliation is just asking again — idempotent by construction, safe to retry or run concurrently. |
-| Mid-webhook-delivery | The webhook is a hint (ADR-0104); a lost delivery is invisible to correctness, only to latency. A retry queue (`webhook_deliveries`) exists for operator visibility, not for correctness. |
-| Internal transfer, response lost | Ordinary DB-transaction idempotency: insert-or-return-existing on `(idempotency_key)`, no chain interaction, no `UNKNOWN` state possible — matches the marketplace's own idempotency-lease pattern for internal writes (ADR-0093), because this operation never leaves BitAI Payment's own database. |
+| After the reservation commits, before `walletcreatefundedpsbt` | Safe — nothing built yet. Retry from scratch. |
+| After PSBT built/signed, before persisting `signed_raw_hex`/`signed_txid` (state still pre-`SIGNED`) | Safe to discard and rebuild — nothing was ever broadcast, and the previously-selected (but now possibly-unlocked) UTXOs simply get reselected. |
+| After `signed_raw_hex`/`signed_txid` persisted (state `SIGNED`), before/during `sendrawtransaction` | **Never rebuild. Never resign.** Check `getrawtransaction(signed_txid)`; if absent, safely re-broadcast the identical persisted `hex` — idempotent by construction because it is byte-for-byte the same transaction. |
+| Mid-reconciliation read | Idempotent by construction — it is only asking again. |
+| Mid-webhook-delivery | The webhook is a hint (ADR-0104); a lost delivery affects latency, not correctness. `webhook_deliveries` exists for operator visibility and retry, not for correctness. |
+| Internal transfer, response lost | Ordinary DB-transaction idempotency: insert-or-return-existing on `idempotency_key`, no chain interaction, no `UNKNOWN` state is even reachable. |
+| Request-signature replay (§4) | Rejected by the nonce store regardless of process crashes on either side — the nonce table is durable and keyed by `(principal, nonce)`, not by in-flight request state. |
 
-`UNKNOWN` in the withdrawal state machine is **not terminal** and is never
-treated as failure, for exactly the reason the marketplace's own
-`PaymentIntentState.UNKNOWN` exists: returning reserved funds on an unknown
-outcome risks paying twice; treating them as gone robs the owner.
-Reserved is the honest position until a label lookup resolves it.
+`UNKNOWN`/`SIGNED`-stuck states are never treated as failure, for the
+same reason the marketplace's own `PaymentIntentState.UNKNOWN` isn't:
+returning reserved funds on an unresolved outcome risks paying twice;
+treating them as gone robs the owner. Reserved is the honest position
+until a `getrawtransaction` lookup resolves it.
 
 ---
 
-## 9. Custody and trust assumptions
+## 10. Custody and trust assumptions
 
 **Version 1 is fully custodial. Stated plainly, not softened.** BitAI
 Payment holds every private key involved — every deposit address and the
 withdrawal wallet — via BitAIcoin Core's own wallet. This is
 mechanically **the same trust model as a centralized exchange**, and the
-same one the marketplace's own Turnkey integration attempt reached for and
-then explicitly shelved rather than ship half-verified (ADR-0143). This
-design does not claim to be safer than that; it inherits the same
-honesty about it.
+same one the marketplace's own Turnkey integration attempt reached for
+and then explicitly shelved rather than ship half-verified (ADR-0143).
 
-"Semi-custodial" is not used to describe v1, deliberately: that term
-implies some real cryptographic split (a 2-of-2 or 2-of-3 multisig where
-BitAI Payment alone cannot move funds), which v1 does not have. If a
-multisig deposit scheme is wanted, it's a genuine, separate design
-decision — BitAIcoin already supports P2WSH multisig (SegWit is active
-from the fork point, Phase 1 M5), so it's technically available, but it
-requires the depositor to generate and safeguard their own key and cosign
-withdrawals, which is real added complexity a "minimum viable" first
-version should not carry by default.
+The omnibus account model (§2) does not weaken this further, but it does
+concentrate it: a single BitAI Payment compromise now puts the *entire*
+marketplace tenant's aggregate balance at risk in one place, rather than
+many small per-agent balances. This is an explicit, named tradeoff for
+this design, not an accident — the alternative (per-agent BitAI Payment
+accounts) is exactly the design that produced the double-ledger bug §2
+fixes. Mitigation is the same operational playbook already named
+(hot/cold split, withdrawal velocity limits, monitoring), applied with
+proportionally more care given the concentration.
+
+"Semi-custodial" is not used to describe v1: that term implies a real
+cryptographic split (a 2-of-2 or 2-of-3 multisig BitAI Payment alone
+cannot satisfy), which v1 does not have. BitAIcoin already supports
+P2WSH multisig (SegWit active from the fork point, Phase 1 M5) if that is
+wanted later — a genuine, separate design decision, not assumed here.
 
 **Threat model, stated as bullets:**
-- A compromised BitAI Payment signing process/key can move any
-  custodial fund it controls. Mitigation is operational (hot/cold wallet
-  split, withdrawal velocity limits, monitoring) — the same playbook the
-  marketplace's own threat-model doc already establishes, not a new one.
-- A compromised BitAI Payment database can forge internal ledger state but
-  **cannot forge a receipt** without also compromising the signing key —
-  the receipt's trust anchor is deliberately narrower than the database's.
-- A BitAIcoin-side compromise (a consensus bug, a 51%-class attack on the
-  underlying chain) is outside BitAI Payment's threat model entirely and
-  is BitAIcoin Core's own concern (see the still-open security-model
-  question in `PHASE1_REPORT.md`).
+- A compromised BitAI Payment signing process/key can move the entire
+  custodied balance it controls (concentrated by the omnibus model —
+  see above). Mitigation is operational, not cryptographic, in v1.
+- A compromised BitAI Payment database can forge internal ledger state
+  but **cannot forge a receipt** without also compromising the Ed25519
+  signing key — the receipt's trust anchor is narrower than the
+  database's.
+- A compromised or malicious *marketplace* tenant credential (§4) can
+  withdraw the marketplace's entire omnibus balance to any address it
+  names — this is inherent to the tenant owning that account, not a
+  bug, and is exactly why request authentication (§4) and the
+  marketplace's own operational security matter as much as BitAI
+  Payment's.
+- A BitAIcoin-side compromise (a consensus bug, a 51%-class attack) is
+  outside BitAI Payment's threat model and is BitAIcoin Core's own
+  concern (the still-open security-model question in
+  `PHASE1_REPORT.md`).
 
-This should never be marketed or documented anywhere as trustless. It
-is not, and pretending otherwise is exactly the kind of overclaim this
-project has avoided throughout (see `PRODUCTION_DIFFICULTY_NOT_FINAL`,
-`docs/HISTORICAL_LINEAGE.md`'s refusal to overclaim what was recovered).
+This should never be marketed or documented anywhere as trustless. It is
+not.
 
 ---
 
-## 10. How a future bilateral-channel backend replaces the ledger backend
+## 11. How a future bilateral-channel backend replaces the ledger backend
 
-The move that makes this possible: **BitAI Payment's own HTTP API (§3)
-already only exposes settlement *outcomes*** (a deposit confirmed, a
-withdrawal confirmed, a balance, a receipt) — it never exposes "there is a
-custodial ledger behind this" as part of its contract. That's the same
-seam-design lesson the marketplace's own `PaymentAdapter` already
-teaches, applied recursively one layer down.
-
-Concretely: introduce a `SettlementEngine` interface *inside* BitAI
-Payment, and make every HTTP handler in §3 call it rather than touching
-the ledger tables directly:
+Unchanged in substance from the prior version — the omnibus account
+model (§2) and the auth model (§4) both sit *above* this seam and are
+unaffected by what's behind it.
 
 ```ts
 interface SettlementEngine {
   recordDeposit(intent: DepositIntent, observed: ObservedUtxo): Promise<SettlementResult>;
   reserveForWithdrawal(intent: WithdrawalIntent): Promise<void>;
   settleWithdrawal(intent: WithdrawalIntent, txid: string): Promise<SettlementResult>;
-  transferInternal(from: string, to: string, amount: string, idempotencyKey: string): Promise<SettlementResult>;
+  transferInternal(fromAccountId: string, toAccountId: string, amount: string, idempotencyKey: string): Promise<SettlementResult>;
   capture(authorizationId: string, amount: string): Promise<SettlementResult>;
 }
 ```
 
-- **v1**: `CustodialLedgerEngine implements SettlementEngine` — exactly
-  §5's double-entry ledger plus `sendtoaddress`.
-- **v2 (future, not designed here)**: `ChannelSettlementEngine implements
-  SettlementEngine` — `transferInternal` routes an off-chain payment
-  through the payer's bilateral HTLC channel to the payee when one is
-  open, falling back to the ledger otherwise; `settleWithdrawal`
-  cooperatively closes or updates a channel instead of calling
-  `sendtoaddress` directly.
-- **Nothing above the `SettlementEngine` line changes.** The HTTP API in
-  §3 is unchanged. `BitaiPaymentAdapter` in the marketplace repo is
-  unchanged — it never learns which engine is behind BitAI Payment. The
-  receipt format (§6) already accommodates this: `externalReference`
-  becomes a channel-update or channel-close reference instead of a raw
-  `txid:vout`, and `chainAnchor` is simply `null` until a channel closes
-  on-chain — both already optional/nullable fields in the schema, not a
-  breaking change.
-
-This is exactly why §6 was designed with `externalReference` as an opaque
-string and `chainAnchor` as nullable from the start, rather than assuming
-every settlement has a UTXO behind it.
+- **v1**: `CustodialLedgerEngine implements SettlementEngine` — §6's
+  ledger plus §8's PSBT-based withdrawal flow.
+- **v2 (future, not designed here)**: `ChannelSettlementEngine` — routes
+  `transferInternal` through a bilateral HTLC channel when one is open;
+  `settleWithdrawal` cooperatively closes or updates a channel instead of
+  building a raw transaction.
+- Nothing above this line changes: not the HTTP API (§3), not
+  `BitaiPaymentAdapter`, not the account-ownership model, not the
+  authentication scheme. The receipt format (§7) already accommodates
+  this — `externalReference` becomes a channel reference and
+  `chainAnchor` is `null` until a channel closes on-chain, both already
+  nullable/optional fields.
 
 ---
 
-## 11. Exact modules/files likely to be added or changed
+## 12. Exact modules/files likely to be added or changed
 
 **Marketplace repo (`agent-marketplace`):**
 
 | File | Change |
 |---|---|
-| `packages/contracts/src/entities/payments.ts` | Add `"BAIC"`, `"BAIC_TEST"` to `ExternalAsset`; add `"BAIC_TEST"` to `SettlementCurrency` (mirrors `USDC_TEST`'s isolation, ADR-0113) |
-| `apps/api/src/modules/payments/bitai-payment-client.ts` | **New.** Thin typed HTTP client for BitAI Payment's own API — plays the role `EvmRpcClient` plays for Base |
+| `packages/contracts/src/entities/payments.ts` | Add `"BAIC"`, `"BAIC_TEST"` to `ExternalAsset`; add `"BAIC_TEST"` to `SettlementCurrency` |
+| `apps/api/src/modules/payments/bitai-payment-client.ts` | **New.** Typed HTTP client, including request signing per §4 |
 | `apps/api/src/modules/payments/bitai-payment-adapter.ts` | **New.** The `BitaiPaymentAdapter` class (§2) |
-| `apps/api/test/bitai-payment-adapter.test.ts` | **New.** Runs `runAdapterConformance` against it, mirroring `base-usdc-adapter.test.ts` |
-| `docs/bitai-payment-adapter.md` | **New**, in the marketplace repo. Mirrors `base-sepolia-usdc.md`'s documentation role |
-| `docs/decisions/01XX-bitaicoin-utxo-first-rail.md` | **New ADR**, recording the UTXO-vs-account-model distinction (unique-address attribution, no sender-proof needed) as a first-class fact, the way ADR-0108/0122/0123/0130 did for Base |
+| `apps/api/test/bitai-payment-adapter.test.ts` | **New.** Runs `runAdapterConformance` |
+| `docs/bitai-payment-adapter.md` | **New**, marketplace repo |
+| `docs/decisions/01XX-bitaicoin-utxo-first-rail.md` | **New ADR** — the UTXO/unique-address distinction |
 
-**BitAI Payment (new, separate service — not designed to exist in either
-existing repo):**
+**BitAI Payment (new, separate service):**
 
 - HTTP API layer (§3)
-- `SettlementEngine` interface + `CustodialLedgerEngine` (§10)
-- `BitcoinCoreRpcClient` — thin wrapper over `bitaicoind`'s JSON-RPC
-  (`getnewaddress`, `listtransactions`, `gettransaction`, `listunspent`,
-  `sendtoaddress`/`send`, `getblockcount`, `getblockhash`)
-- `bitaicoin-finality.ts` (§7's note — new, small, chain-specific)
-- Database schema (§5)
-- Ed25519 receipt signer/verifier (§6) — a well-known library, not new
-  cryptography
-- Webhook dispatcher + retry queue
+- `AuthenticationMiddleware` — request-signature verification, nonce-replay defense (§4)
+- `SettlementEngine` interface + `CustodialLedgerEngine` (§11)
+- `BitcoinCoreRpcClient` — wrapper over `bitaicoind`'s JSON-RPC, exposing
+  specifically: `getnewaddress`, `listunspent`, `gettransaction`,
+  `getrawtransaction`, `walletcreatefundedpsbt`, `walletprocesspsbt`,
+  `finalizepsbt`, `decoderawtransaction`, `lockunspent`,
+  `sendrawtransaction`, `getblockcount`, `getblockhash`
+- `PsbtWithdrawalBuilder` — encapsulates §8's build→lock→sign→finalize→
+  persist→broadcast sequence as one auditable unit
+- `bitaicoin-finality.ts` (§8's note)
+- Database schema (§6), including `principals` and `request_nonces` (§4)
+- Ed25519 signer/verifier, shared by request auth (§4) and receipts (§7)
+- Webhook dispatcher + retry queue, reading destinations only from the
+  `principals` table (§4) — never from a request body
 
 **BitAIcoin Core (this repo):** no code changes. Optionally, a short
-addition to `docs/AGENT_PAYMENTS.md` or a new `docs/RPC_SURFACE.md` listing
-exactly which stock RPCs BitAI Payment depends on, so a future BitAIcoin
-change doesn't silently break an external dependent — documentation only.
+addition to `docs/AGENT_PAYMENTS.md` or a new `docs/RPC_SURFACE.md`
+listing exactly which stock RPCs BitAI Payment depends on (the list
+above), so a future BitAIcoin change doesn't silently break an external
+dependent.
 
 ---
 
-## 12. The smallest end-to-end acceptance test
+## 13. Note on direct/non-marketplace use
 
-Working through the user's specified flow against the marketplace's actual,
-existing architecture surfaced one real design decision worth making
-explicit rather than defaulting past it (see the note after the flow).
+Several pieces of this design (`/v1/authorizations`, `/v1/challenges`,
+`INDIVIDUAL` principals with their own accounts) exist for an agent
+paying a raw HTTP-402 endpoint with no marketplace Task/Quote/Contract
+behind it at all. They are part of the design because the user's original
+spec asked for them and because BitAI Payment is meant to be a genuinely
+reusable payment layer, not something married to one marketplace. They
+are **not exercised by §14's acceptance test**, which is entirely the
+marketplace-mediated path.
+
+---
+
+## 14. The smallest end-to-end acceptance test
+
+Revised for the omnibus account model (§2) and the two-attestation
+distinction (§7). The design tension the prior version glossed over —
+whether "BitAI Payment authorization" in the user's original flow
+diagram means BitAI Payment holds funds per-contract — is resolved the
+same way as before and restated precisely here: it does not. The
+existing marketplace Escrow, unmodified, is what holds funds per
+contract; BitAI Payment's role is limited to the aggregate deposit that
+preceded it and the aggregate withdrawal that may follow it, at an
+unrelated time.
 
 ```
-1. Buyer deposits BAIC_TEST:
-   POST /v1/deposit-intents (BitAI Payment) -> deposit address
-   Buyer sends BAIC on the lab chain -> address
-   BitAI Payment observes confirmation (§7) -> credits buyer's BitAI Payment balance
-   BitaiPaymentAdapter's DEPOSIT PaymentIntent reaches CONFIRMED
-   -> marketplace's own internal ledger credits buyer AGENT_AVAILABLE in a BAIC_TEST-denominated account
-      (isolated from USD exactly like USDC_TEST, ADR-0113)
+1. The marketplace (TENANT principal) creates a deposit-intent for ITS OWN
+   omnibus account:
+     POST /v1/deposit-intents  (authenticated as the marketplace tenant, §4)
+     -> deposit address
+   A buyer (an identity BitAI Payment never learns) sends BAIC_TEST to it.
+   BitAI Payment observes confirmation (§8) -> credits the MARKETPLACE'S
+   OMNIBUS account (not an individual one) -> issues a Custody Settlement
+   Receipt (kind=DEPOSIT_SETTLED, accountRef=the omnibus account) to the
+   marketplace tenant.
 
-2. Buyer creates a Task, accepts a Quote -> Contract           (existing marketplace flow, unmodified)
-3. Mandate evaluation authorizes the spend                      (existing marketplace flow, unmodified)
-4. Marketplace funds Escrow: ESCROW_FUND posting,
-   buyer AGENT_AVAILABLE(BAIC_TEST) -> contract ESCROW(BAIC_TEST) (existing marketplace ledger, unmodified — no adapter call)
-5. Seller completes work off-platform; buyer verifies delivery  (existing marketplace flow, unmodified)
-6. Marketplace releases Escrow: ESCROW_RELEASE posting,
-   contract ESCROW(BAIC_TEST) -> seller AGENT_AVAILABLE(BAIC_TEST) (existing marketplace ledger, unmodified)
-7. Contract -> COMPLETED; marketplace emits CONTRACT_SETTLED     (existing marketplace flow, unmodified)
+2. BitaiPaymentAdapter's DEPOSIT PaymentIntent reaches CONFIRMED.
+   -> HERE, and only here, does "the buyer" as an identity enter the
+      picture: the marketplace's own ledger credits that specific buyer's
+      AGENT_AVAILABLE(BAIC_TEST). BitAI Payment never sees this step.
 
-8. (Separately) Seller requests a withdrawal of their BAIC_TEST proceeds:
-   BitaiPaymentAdapter.submitTransfer(purpose=WITHDRAWAL) -> POST /v1/withdrawals
-   BitAI Payment reserves, calls sendtoaddress with the idempotency key as label (§7)
-   Confirms on the BitAIcoin lab chain -> WithdrawalIntent CONFIRMED
-   BitAI Payment issues a signed receipt (§6): kind=WITHDRAWAL_SETTLED,
-     externalReference="bitaicoin:<txid>:<vout>", chainAnchor={height, hash}
+3. Buyer creates a Task, accepts a Quote -> Contract      (existing marketplace flow, unmodified)
+4. Mandate evaluation authorizes the spend                 (existing marketplace flow, unmodified)
+5. Marketplace funds Escrow: ESCROW_FUND posting,
+   buyer AGENT_AVAILABLE(BAIC_TEST) -> contract ESCROW(BAIC_TEST)
+   (existing marketplace ledger, unmodified — no BitAI Payment call; the
+    funds are already inside the marketplace's aggregate custody, sitting
+    in the same omnibus account, the entire time)
+6. Seller completes work off-platform; buyer verifies delivery
+   (existing marketplace flow, unmodified)
+7. Marketplace releases Escrow: ESCROW_RELEASE posting,
+   contract ESCROW(BAIC_TEST) -> seller AGENT_AVAILABLE(BAIC_TEST)
+   (existing marketplace ledger, unmodified)
+8. Contract -> COMPLETED; marketplace emits CONTRACT_SETTLED.
+   THIS IS THE CONTRACT-SETTLEMENT RECORD (§7) IN FULL. It requires
+   nothing further from BitAI Payment, and nothing from BitAI Payment
+   gates it — that coupling in the prior version of this design is
+   removed as incorrect.
 
-9. Acceptance criterion: an independent verifier — no API call to BitAI
-   Payment required — checks the receipt's Ed25519 signature against BitAI
-   Payment's published key, and independently confirms chainAnchor.blockHash
-   against their own bitaicoin-cli. Both pass.
+9. (Separately, later, decoupled in time and amount — the seller may have
+   accumulated proceeds from several contracts) the seller requests a
+   withdrawal. The marketplace, still the TENANT principal, calls:
+     BitaiPaymentAdapter.submitTransfer(purpose=WITHDRAWAL)
+       -> POST /v1/withdrawals, debiting the SAME omnibus account,
+          paying out to the seller's own external address (an address
+          the marketplace itself supplies and manages — outside this
+          design's scope, matching how withdrawals already work for the
+          existing Base Sepolia rail, Phase 18/ADR-0144).
+   BitAI Payment executes §8's PSBT-based withdrawal flow, confirms
+   on-chain, and issues a Custody Settlement Receipt
+   (kind=WITHDRAWAL_SETTLED, accountRef=the omnibus account,
+   externalReference="bitaicoin:<txid>:<vout>", chainAnchor={height, hash}).
+
+10. Acceptance criteria — checked separately, on purpose:
+    a. CONTRACT_SETTLED fired correctly, sourced entirely from the
+       marketplace's own ledger (step 8) — an ordinary marketplace test,
+       requiring no BitAI Payment interaction to verify.
+    b. Independently, an offline verifier — no API call to BitAI Payment —
+       checks the withdrawal's Custody Settlement Receipt: Ed25519
+       signature valid, and chainAnchor.blockHash independently confirmed
+       against the verifier's own bitaicoin-cli.
+    c. The receipt's scopeNote (§7) is present and the test asserts the
+       receipt is NOT treated anywhere in the test as proof that step 6-8
+       occurred — only as proof that step 9's on-chain movement occurred.
 ```
-
-**The design note this surfaced:** the user's own diagram phrasing —
-`mandate approval → BitAI Payment authorization → ... → BitAI Payment
-settles → BitAIcoin-backed settlement recorded → signed receipt created →
-CONTRACT_SETTLED` — reads naturally as BitAI Payment's own
-authorization/capture primitive (§3's `/v1/authorizations`) backing the
-contract's escrow directly, with the receipt issued *before*
-`CONTRACT_SETTLED`. That is a **different, larger architecture change**
-than the one above: it would make the marketplace's `Escrow` module
-rail-aware for the first time, when today "escrow funding moves value
-between two internal accounts and involves no adapter at all" for *every*
-existing rail, including the live Base Sepolia one. Introducing that
-now would be exactly the kind of duplicated authority §duplication (below)
-warns about — two systems (BitAI Payment's hold and the marketplace's
-escrow) both claiming to be the reason a contract's funds are locked.
-
-The flow above gets the same real-world outcome — a contract that could
-only be funded because real BAIC moved on-chain, and a cryptographic
-receipt proving a real BitAIcoin settlement occurred — **without**
-touching the marketplace's Escrow module at all: the deposit is the
-"authorization" (funds are real and available before the contract exists),
-and escrow/release stay exactly as proven today. If per-contract holds
-inside BitAI Payment itself are genuinely wanted (e.g., so a deposit isn't
-required upfront), that is worth a deliberate follow-up decision, not a
-default.
 
 ---
 
 ## What duplicates existing functionality (and should not be built twice)
 
-Direct answer to the question asked, gathered in one place:
-
-1. **Authorization/capture for marketplace contracts** — already fully
-   provided by the marketplace's own Mandate → Escrow → Release/Refund
-   pipeline. BitAI Payment's own `/v1/authorizations` primitive should be
-   reserved for **direct, non-marketplace** L402 use (an agent paying a
-   raw HTTP 402 endpoint with no Task/Quote/Contract behind it) — not
-   re-invoked per marketplace contract. See §12's note.
-2. **Idempotency infrastructure** — the marketplace has its own
-   idempotency-lease system (ADR-0093) for its own API; BitAI Payment
-   needs its own, separate one for its own API and for BitAIcoin RPC calls
-   (§8). These are naturally distinct layers, not a duplicate system —
-   but they should not be merged, and the marketplace's idempotency key
-   for a `PaymentAdapter` call is what *becomes* BitAI Payment's own
-   idempotency key, not a second, independent one generated at that
-   boundary.
-3. **Reconciliation** — the marketplace's reconciliation module
-   (`docs/reconciliation.md`) checks its own ledger against its own
-   postings; it cannot and should not be asked to also reconcile BitAI
-   Payment's ledger against BitAIcoin. BitAI Payment needs its own
-   reconciliation sweep (§3's `POST /v1/reconcile`, §5's
-   `reconciliation_findings`) — but should **adopt the same design
-   discipline** (read-only, stable finding codes, no repair function for
-   authoritative money, ADR-0090) rather than inventing a different
-   philosophy for the same category of problem.
-4. **The double-entry ledger pattern** — BitAI Payment should use the
-   same discipline (append-only postings, balance derived not stored,
-   balanced-transaction constraint) the marketplace already proved, for
-   its own, separately-denominated (`BAIC`/`BAIC_TEST`) ledger. Same
-   pattern, different money — not the same ledger, and never
-   commingled with USD accounts (mirrors ADR-0113 exactly).
-5. **Confirmation-depth/reorg evaluation** — `evm-finality.ts`'s exact
-   code is not reusable (its `receiptStatus` field is EVM-specific), but
-   its *design* (confirmations = head − height + 1; reorg = recorded
-   block hash disagreement; below-depth is `PROVISIONAL`, never
-   creditable) transfers directly and should be re-implemented as a small
-   new function, not reinvented differently or skipped.
+1. **Authorization/capture for marketplace contracts** — fully provided
+   by the marketplace's own Mandate → Escrow → Release/Refund pipeline.
+   BitAI Payment's `/v1/authorizations` is for direct, non-marketplace
+   L402 use only (§13) — never re-invoked per marketplace contract, and
+   structurally cannot be under the omnibus model, since BitAI Payment
+   has no notion of "a contract" to hold funds against.
+2. **Idempotency infrastructure** — the marketplace's own idempotency-
+   lease system (ADR-0093) is separate from BitAI Payment's; the
+   marketplace's `PaymentAdapter` idempotency key *becomes* BitAI
+   Payment's own idempotency key at the boundary, never a second,
+   independently-generated one.
+3. **Reconciliation** — BitAI Payment needs its own sweep (§3, §6's
+   `reconciliation_findings`) reconciling its own ledger against
+   BitAIcoin — but adopts the marketplace's proven discipline (read-only,
+   stable codes, no repair function for authoritative money, ADR-0090)
+   rather than inventing a different one.
+4. **The double-entry ledger pattern** — reused as a pattern, for a
+   separately-denominated (`BAIC`/`BAIC_TEST`) ledger, never commingled
+   with USD accounts (ADR-0113's isolation, applied identically).
+5. **Confirmation-depth/reorg evaluation** — `evm-finality.ts`'s code
+   isn't reusable (EVM-specific revert field); its design is, in a new,
+   small, BitAIcoin-specific function (§8).
 6. **UTXO/key management** — BitAIcoin Core's own wallet already does
-   address generation, UTXO tracking, transaction construction and
-   signing correctly (verified live, repeatedly, throughout Phase 1).
-   BitAI Payment must not reimplement any of this — it is an
-   orchestration layer over `bitaicoind`'s existing RPC, exactly as this
-   design specifies, consistent with "BitAIcoin Core remains a narrow
-   settlement/monetary layer."
-7. **Agent identity / signature verification** — the marketplace already
-   has a working Ed25519 challenge/response system (ADR-0011) and a
-   canonical-serialization discipline for signed payloads. BitAI Payment's
-   receipt signing (§6) reuses the same primitive and the same
-   serialization discipline rather than introducing a second one.
+   this correctly. BitAI Payment orchestrates it via RPC (§8, verified
+   against the actual fork) rather than reimplementing any of it.
+7. **Agent identity / signature verification** — BitAI Payment's request
+   authentication (§4) and receipt signing (§7) reuse one Ed25519
+   primitive, the same one the marketplace already uses for agent auth
+   (ADR-0011) — one crypto scheme for the whole system, including this
+   new boundary, not a second one.
+8. **Per-agent balance tracking for marketplace-originated funds** — this
+   is now explicitly the marketplace's job alone (§2). BitAI Payment
+   tracking it too was the double-ledger bug this revision fixes, not a
+   feature to preserve in any form.
 
 ---
 
@@ -690,15 +876,20 @@ Direct answer to the question asked, gathered in one place:
 - **Confirmation depth** — depends on the still-open BitAIcoin production
   security-model decision.
 - **Facilitator/direct-L402 trust policy** — whether BitAI Payment ever
-  trusts a third-party facilitator's payment claim, or only ever trusts
-  its own chain observation (the marketplace's own x402-compatibility.md
-  flagged this as unresolved for the analogous case, and the same
-  reasoning applies here unchanged: a claim is a hint, never an
-  instruction).
+  trusts a third-party facilitator's payment claim (same open question
+  the marketplace's own `x402-compatibility.md` recorded for the
+  analogous case; same answer applies unchanged: a claim is a hint,
+  never an instruction).
 - **Multisig/semi-custodial upgrade path** — technically available
   (SegWit is active), not designed here, and not assumed by anything
-  above — §10's `SettlementEngine` seam is what would carry it, whichever
-  form it eventually takes.
-- **HD wallet vs. per-address `getnewaddress` calls** — an implementation
-  detail of the `CustodialLedgerEngine`, deliberately left open since it
+  above.
+- **Individual-principal (`INDIVIDUAL`) self-registration flow** — how a
+  direct, non-marketplace user first obtains a provisioned principal and
+  submits their public key. Deliberately out of scope for the
+  marketplace-mediated acceptance test (§14), which only needs one
+  `TENANT` principal.
+- **Key rotation and per-principal rate limiting** — real operational
+  needs, don't change any interface shape above, not designed here.
+- **HD wallet vs. per-address `getnewaddress` calls** — an
+  implementation detail of `CustodialLedgerEngine`, left open since it
   doesn't affect anything above the `SettlementEngine` line.
