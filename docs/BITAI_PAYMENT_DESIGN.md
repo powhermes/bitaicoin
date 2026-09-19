@@ -1160,6 +1160,119 @@ moving.
 
 ---
 
+## 16. BitAI Pay-402 Developer Preview
+
+Goal: make §15's already-working protocol adoptable by a developer who
+never saw this repo's internals — a hard gate distinct from "does the
+protocol work," which §15 already answered. **BitAI Pay-402 v1's
+architecture is treated as proven and frozen by this point**: this
+section is SDK/ergonomics work on top of it, not a redesign, per
+explicit instruction. Nothing here touches BitAIcoin, and no bilateral
+channel work starts here.
+
+**Compatibility baseline, preserved first.** Before any SDK code was
+written, the v1 state was tagged `pay402-v1-baseline` in the
+`bitai-payment` repo, and `test/pay402-compatibility-baseline.test.ts`
+was added to pin the exact wire shapes (protocol/schemaVersion
+constants, the proof header name, the literal `scopeNote` text, the
+Challenge and Proof field sets, and — added in this same pass, see
+below — the exact HTTP status per authorization error code). That test
+is now part of `pnpm verify` and fails loudly if the wire protocol ever
+drifts by accident.
+
+### The two additive changes this work required
+
+Both are backward-compatible extensions, not edits to the v1 baseline;
+neither bumps `protocol` (that string versions only the Challenge/Proof
+shapes, which are unchanged):
+
+1. **`POST /v1/authorizations` failure responses gained a machine-
+   readable `code` field** (`src/pay402/authorization-service.ts`'s new
+   `AuthorizationError`/`AuthorizationErrorCode`, replacing the route's
+   original message-string-matching). The v1 baseline's `ALREADY_PAID_BY_OTHER`
+   case already put a code-like value in the `error` field
+   inconsistently with every other case (which used a human sentence);
+   this is now uniform. This was a genuine external-adoption problem —
+   asking an SDK to regex-match English error text is not a contract
+   anyone should build on — and the smallest fix available.
+2. **A new, unauthenticated `GET /v1/signing-key` endpoint** was added
+   (`src/http/app.ts`), returning `{signingKeyId, publicKeyHex}` for the
+   one Ed25519 key that signs both Custody Settlement Receipts (§7) and
+   BitAI Pay-402 proofs (§15). Before this, an external integrator had
+   no way to obtain that key except being told it out-of-band by a
+   BitAI Payment operator — a real blocker for "usable without
+   understanding BitAI Payment internals." Purely additive: no existing
+   route, field, or status code changed.
+
+No other protocol change was made. The Challenge and Proof schemas,
+every endpoint's success shape, the single-use `(payee,
+paymentReference)` constraint, and the auto-capture behavior are all
+exactly as §15 specified.
+
+### What was built
+
+- **`sdk/client`** — `Pay402Client`: recognizes a 402, validates the
+  Challenge client-side before spending anything
+  (`validateChallenge.ts`), authorizes/pays through BitAI Payment,
+  verifies the returned proof's signature *and* that its fields actually
+  match what was paid for, retries the original request, and throws a
+  closed `Pay402ClientError` taxonomy
+  (`INVALID_CHALLENGE`/`CHALLENGE_EXPIRED`/`SELF_PAYMENT_NOT_ALLOWED`/
+  `PRINCIPAL_NOT_INDIVIDUAL`/`INSUFFICIENT_BALANCE`/
+  `ALREADY_PAID_BY_OTHER`/`PROOF_VERIFICATION_FAILED`/
+  `RESOURCE_ALREADY_REDEEMED`/`UNEXPECTED_RESPONSE`) for every failure
+  mode the task specified, rather than an untyped error.
+- **`sdk/server`** — `Pay402Guard`, framework-agnostic: mints a scoped
+  Challenge, verifies a presented proof against BitAI Payment's
+  published key entirely offline, and atomically redeems it via a
+  pluggable `RedeemedReferenceStore` (`tryRedeem()` is one atomic
+  check-and-set, not a racy has()/add() pair; ships an in-memory default,
+  documented as needing Redis/a DB row for a real multi-instance
+  deployment). `sdk/server/fastify-pay402.ts` is the one framework-
+  specific file — a ~20-line `preHandler` adapter, since this repo
+  already runs on Fastify; the guard itself has no framework dependency,
+  documented explicitly so an Express/Koa integrator knows exactly what
+  to port.
+- **`sdk/reference-app`** — one protected endpoint (`service.ts`, built
+  only on `sdk/server`), one payer script (`payer-agent.ts`, built only
+  on `sdk/client`), and a standalone runnable demo (`run.ts`,
+  `pnpm exec tsx sdk/reference-app/run.ts`) with no other running
+  service required. Deliberately separate from `examples/pay402-demo`
+  (§15's own reference, which talks to BitAI Payment's internal services
+  directly and remains the frozen compatibility baseline's fixture,
+  untouched by this work) — the two prove different things: that one
+  proves the protocol is correct; this one proves the SDK is a faithful,
+  ergonomic implementation of it.
+- **`sdk/test/pay402-sdk.test.ts`** — the Developer Preview's own hard
+  acceptance test, exercising every required failure mode (insufficient
+  balance, expired challenge, malformed challenge, a second principal
+  racing to pay an already-captured reference, a replayed proof against
+  the payee, a proof that fails signature verification) against real,
+  independently-listening HTTP servers, entirely through `sdk/client`
+  and `sdk/reference-app` — no internal-service imports.
+- **`sdk/README.md` + `sdk/docs/PROTOCOL.md`** — developer-facing
+  documentation living *with the SDK*, not only in this design doc: the
+  10-minute integration example, exact Challenge/Proof schemas, the
+  trust and security/replay model restated for an outside reader, and an
+  explicit, tabular comparison against Lightning L402 and `x402`
+  (HTTP-USDC) so nobody conflates BitAI Pay-402's custodial,
+  ledger-settled model with either.
+
+### A documented, deliberate scope note on where docs live
+
+This design doc (`BITAI_PAYMENT_DESIGN.md`) lives in the `bitaicoin-dev`
+repo — a reasonable home for the internal architecture record, but not
+one an external Pay-402 adopter has any reason to ever clone. That's
+fine for *this* document's audience (a BitAI Payment maintainer) but
+would be a real adoption failure for developer-facing docs, so those
+were written fresh, self-contained, inside `bitai-payment/sdk/` instead
+of by reference to this file. This doc and `sdk/docs/PROTOCOL.md`
+deliberately overlap on the wire-format facts (Challenge/Proof shape,
+error codes) — that overlap is intentional, not a maintenance debt to
+resolve, since the two serve different, non-overlapping readers.
+
+---
+
 ## What duplicates existing functionality (and should not be built twice)
 
 1. **Authorization/capture for marketplace contracts** — fully provided
