@@ -269,11 +269,16 @@ nodes. All three stopped cleanly at the end of the test
    to revalidate 225,430 blocks three separate times and produces
    byte-identical results; it does mean this specific run did not
    independently prove three-way P2P import reliability from a cold
-   start. **Note:** as of M5, Node A's chain was fully rebuilt (see the
-   retarget-clamp bugfix above) but Node B/C's copies were *not*
-   refreshed in this session — their `blocks/`/`chainstate/` still
-   reflect the pre-M5 chain and should be re-seeded from the current
-   Node A before any further multi-node testing.
+   start. **Update:** Node B/C were re-seeded from Node A's fully-fixed
+   M5 chain and the three-node network re-verified live: all three
+   converged on identical `getblockcount`/`getbestblockhash` after fresh
+   mining, and a native bech32 (SegWit) `sendtoaddress` from Node A to
+   Node B confirmed and propagated correctly (`getbalance` on Node B
+   matched the sent amount exactly). This still does not independently
+   prove three-way P2P import reliability from a cold start (the
+   copy-instead-of-import limitation itself is unchanged), but confirms
+   all of M5's fixes hold under real multi-node propagation, not just on
+   a single node.
 6. **Difficulty ceiling (`consensus.powLimit`) and activation target
    (`BitAIActivationPowLimit`) are explicit development placeholders**
    (`PRODUCTION_DIFFICULTY_NOT_FINAL` in code comments), chosen for lab
