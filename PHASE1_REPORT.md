@@ -293,7 +293,17 @@ nodes. All three stopped cleanly at the end of the test
    `maxtries`, recalibrated in M5 from an earlier, unsafe near-instant
    value that caused a retarget-multiply overflow — see the bugfix
    section above), not as a considered choice for any eventual public
-   network.
+   network. The real production question this doesn't answer — what
+   mining/security model BitAIcoin should eventually run on (a
+   permissioned miner set vs. fully public PoW, and if public, whether
+   SHA256d is even the right algorithm given how trivially existing
+   Bitcoin hashpower could redirect at a new SHA256d chain) — remains an
+   open decision, deliberately not made unilaterally. What *is* now
+   hardened regardless of that decision: a startup assertion in
+   `CBitAIcoinParams` (`kernel/chainparams.cpp`) requires any future
+   `powLimit` value to leave adequate overflow headroom, verified live to
+   correctly reject the original unsafe value — see `docs/CONSENSUS.md`
+   point 6's "Hardening beyond the fix itself."
 7. **No live test of the headers-sync anti-DoS clamp fix**
    (`PermittedDifficultyTransition`, M5). This code path is only
    exercised during normal P2P headers-first sync from a peer; Phase 1's

@@ -5,6 +5,7 @@
 
 #include <kernel/chainparams.h>
 
+#include <arith_uint256.h>
 #include <chainparamsseeds.h>
 #include <consensus/amount.h>
 #include <consensus/merkle.h>
@@ -291,6 +292,31 @@ public:
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false;
         consensus.fPowNoRetargeting = false;
+
+        // Hard startup guard against the exact M5 retarget-overflow bug recurring, no matter
+        // what powLimit value is chosen for this field in the future (including a real,
+        // eventually-considered production one) -- see docs/CONSENSUS.md point 6 for the full
+        // story of what happens without this guard: CalculateNextWorkRequired's intermediate
+        // `bnNew *= nActualTimespan` multiply (nActualTimespan can be as large as
+        // nPowTargetTimespan*4) silently overflows arith_uint256's 256-bit width if powLimit
+        // doesn't leave enough headroom below the maximum, wrapping into an essentially
+        // arbitrary difficulty rather than erroring. The bare requirement is
+        // `pow_limit_bits + timespan_bits <= 256`; this assert additionally requires a small
+        // (>=4 bit) safety margin beyond that bare minimum, so a value is never accepted right
+        // at the razor's edge. BitAIcoin's current value (28 bits of headroom) clears this
+        // with a comfortable 5-bit margin; real Bitcoin's own powLimit values clear it with an
+        // even larger 9-bit margin (32 bits of headroom). Fails loudly at startup rather than
+        // silently miscomputing difficulty months later.
+        {
+            const int pow_limit_bits = UintToArith256(consensus.powLimit).bits();
+            const int64_t max_timespan = consensus.nPowTargetTimespan * 4;
+            int timespan_bits = 0;
+            for (int64_t v = max_timespan; v > 0; v >>= 1) ++timespan_bits;
+            constexpr int kMinSafetyMarginBits = 4;
+            assert(pow_limit_bits + timespan_bits <= 256 - kMinSafetyMarginBits &&
+                   "BitAIcoin: powLimit leaves insufficient headroom below the uint256 maximum "
+                   "for the retarget multiply -- see docs/CONSENSUS.md point 6");
+        }
 
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;

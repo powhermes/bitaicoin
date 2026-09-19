@@ -177,6 +177,18 @@ seconds on ordinary development hardware, unlike mainnet's real `powLimit`
 default `maxtries` to reliably succeed at all, which was tried and
 rejected as an intermediate fix attempt before landing on this value).
 
+**Hardening beyond the fix itself:** `CBitAIcoinParams`'s constructor
+(`kernel/chainparams.cpp`) now asserts at startup that `powLimit` leaves
+at least a small (≥4 bit) safety margin beyond the bare
+`pow_limit_bits + timespan_bits <= 256` requirement, using
+`arith_uint256::bits()`. This is deliberately generic — it doesn't
+hardcode today's specific value, so it protects against this exact bug
+class recurring no matter what `powLimit` is chosen in a future phase,
+including a real, eventually-considered production value. Verified both
+directions live: rebuilding with the original unsafe `0x7fffff...ff`
+value makes the daemon abort immediately at startup with a clear message
+naming the cause, while the current calibrated value starts cleanly.
+
 ### 7. Taproot-spend rejection (new, scope boundary — not a sighash fix)
 
 Real Bitcoin's Taproot (BIP341/342) sighash algorithm uses a
