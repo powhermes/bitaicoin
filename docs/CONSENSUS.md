@@ -62,11 +62,11 @@ target would make the easy activation block un-minable and rejected as
 real recorded difficulty was always far stricter than even this loosened
 ceiling — loosening the ceiling does not retroactively change what
 historical blocks look like, it only changes what's accepted going
-forward. **This value (`0x7fff...ff`, roughly 2 bits below the maximum
-representable target) is a development convenience — real blocks mine in
-well under a second at this difficulty — and is explicitly a `PRODUCTION_
-DIFFICULTY_NOT_FINAL` placeholder, not a considered choice for any
-eventual public network.**
+forward. **Current value: `0x0000000fffff...ff` (28 bits of headroom
+below the uint256 maximum) — see point 6 below for why this specific
+value was chosen and what happens with a less careful one.
+`PRODUCTION_DIFFICULTY_NOT_FINAL`: a lab-appropriate choice, not a
+considered one for any eventual public network.**
 
 ### 3. Replay protection: fork-ID sighash folding (new)
 
@@ -94,7 +94,7 @@ real Bitcoin's very first difficulty retarget (height 2016) computed a
 raw target *looser* than mainnet's real powLimit and got clamped back
 down to exactly that ceiling — which is why block 2016's recorded
 `nBits` equals genesis's. Loosening `consensus.powLimit` chain-wide (see
-point 5 below) removed that clamp for the *entire* chain, including for
+point 2 above) removed that clamp for the *entire* chain, including for
 recomputing this real historical retarget during a full revalidation —
 BitAIcoin would then compute a different (looser) target than the one
 actually recorded on real block 2016, and `ContextualCheckBlockHeader`
@@ -109,7 +109,75 @@ and every real historical block's target is already stricter than even
 mainnet's own original ceiling, so using a looser ceiling there never
 incorrectly rejects genuine historical data.
 
-### 5. Taproot-spend rejection (new, scope boundary — not a sighash fix)
+### 5. Headers-sync anti-DoS clamp (new, bugfix — same class as point 4)
+
+`PermittedDifficultyTransition` (`src/pow.cpp`) is the anti-DoS check
+Bitcoin Core's headers-first sync (`src/headerssync.cpp`, both its
+presync and redownload phases) runs on every retarget boundary in a
+peer's offered header chain, guarding against a peer feeding a
+low-effort but seemingly-high-work fake chain. It has its own,
+independent min/max envelope calculation against `consensus.powLimit`,
+completely separate from `CalculateNextWorkRequired`'s clamp — meaning
+point 4's fix did not cover it. This function now applies the same
+historical/loosened split (`BitAIHistoricalPowLimit` for retarget
+heights below `BitAIActivationHeight`, `powLimit` at/above it) for the
+same reason: using the loosened ceiling for a real historical retarget's
+envelope check widens Bitcoin's own historical security margin past what
+it was designed to be, for any BitAIcoin node syncing that history via
+ordinary P2P from a peer rather than this project's own `-loadblock`
+bootstrap (a code path Phase 1's own node-to-node testing never
+exercises, since all three test nodes are seeded from the same validated
+import — see `docs/TESTNET_RUNBOOK.md`).
+
+### 6. Retarget-multiply overflow and the calibrated `powLimit` value (new, bugfix)
+
+A second, more serious bug in the same family, found by actually mining
+the live chain forward to its first natural post-activation retarget
+boundary (real height 225792) rather than assuming the design was
+correct: `CalculateNextWorkRequired`'s intermediate step,
+`bnNew *= nActualTimespan` (computed *before* dividing by
+`nPowTargetTimespan`), can itself overflow `arith_uint256`'s fixed
+256-bit width when the starting target (`old_target`, `pindexLast->nBits`)
+is already close to the uint256 maximum — silently wrapping into an
+essentially arbitrary result, not saturating or erroring. `nActualTimespan`
+can be as large as `nPowTargetTimespan*4` (~2^23), so avoiding this
+requires `old_target` to have at least ~23 bits of headroom below the
+256-bit maximum.
+
+BitAIcoin's original choice of `powLimit`/`BitAIActivationPowLimit`
+(`0x7fffff...ff`, only ~1 bit of headroom) violated this by a wide
+margin. Confirmed live: at real height 225792, the retarget window's
+2016-block lookback spans real 2013 historical timestamps and present-day
+synthetic ones, producing a computed "actual timespan" of over a decade
+that gets clamped to the maximum ratio (4x) — and multiplying the
+already-near-maximum activation target by that clamped ratio overflowed,
+wrapping to a target that decoded as `bits=1e09debb` (a difficulty roughly
+850,000x higher than intended, computed and verified by hand to
+bit-for-bit match the real overflow-wrapped arithmetic).
+
+Real Bitcoin's own `powLimit` values (mainnet, testnet, signet) all carry
+32 bits of headroom for exactly this reason — it is a load-bearing
+invariant of the retarget formula, not an arbitrary convention. Note that
+`regtest`'s own chainparams use the identical `0x7fffff...ff` value
+BitAIcoin originally copied, but regtest is not a counter-example: it
+also sets `fPowNoRetargeting = true`, which returns `pindexLast->nBits`
+immediately and never reaches the overflow-prone arithmetic at all.
+
+Fixed by recalibrating `powLimit` and `BitAIActivationPowLimit` to
+`0x0000000fffff...ff` (28 bits of headroom — 5 bits of margin above the
+~23-bit minimum, deliberately more than a razor's-edge value). Verified
+live: mining forward past real height 225792 a second time produced a
+stable, sane result (`bits` unchanged across the boundary, since the
+clamped-to-ceiling outcome is now correctly bounded rather than
+overflowing). This value still needs real, non-default `maxtries` when
+testing (`generatetoaddress`'s default cap is too low for ~2^28 average
+hash attempts) — see `docs/TESTNET_RUNBOOK.md` — but mines in single-digit
+seconds on ordinary development hardware, unlike mainnet's real `powLimit`
+(~2^32 average attempts, empirically too slow for `generatetoaddress`'s
+default `maxtries` to reliably succeed at all, which was tried and
+rejected as an intermediate fix attempt before landing on this value).
+
+### 7. Taproot-spend rejection (new, scope boundary — not a sighash fix)
 
 Real Bitcoin's Taproot (BIP341/342) sighash algorithm uses a
 domain-separated tagged hash with Schnorr signatures, architecturally
@@ -164,7 +232,7 @@ than silently resolved, and has since been decided and implemented:
   outright. Second, this changes nothing about the actual security
   guarantee: `CheckInputScripts` already structurally rejects any spend
   of a Taproot-shaped output at height ≥ `BitAIActivationHeight`
-  unconditionally (point 5 above), regardless of this deployment's own
+  unconditionally (point 7 above), regardless of this deployment's own
   state — Taproot outputs can be created (as still-valid "future
   upgrade" witness programs, exactly as real pre-activation Bitcoin
   treats unknown witness versions) but can never be spent on BitAIcoin.

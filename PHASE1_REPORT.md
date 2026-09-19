@@ -72,17 +72,19 @@ weak-linked symbol resolves to null at runtime); fixed with an
 - Fork anchor hash (real Bitcoin mainnet, enforced by consensus):
   `0000000000000366ce98ca28338900094e8cbf445776253181749f782546d006`
 - Activation height (first BitAIcoin-native block): **225430**
-- First BitAIcoin block hash (M5 test run, post SegWit-activation fix):
-  `05b52b03589c11c30c909a9c8e33071344c61ce996c202554d139e81e417d45d`
-  (an earlier test run recorded a different hash,
-  `2a9a48dc2492d70e0187cd8a1972e6bda777d7653cfa237504cedc19c6c56ec8`,
-  from before SegWit activated at this height — both are valid
-  activation blocks under their respective rule sets, since nothing about
-  the fork-anchor/activation mechanism itself changed between them; only
-  the fresh mining nonce/timestamp differs)
-- Activation block `bits`/target: `207fffff` (matches
+- First BitAIcoin block hash (final M5 test run, post powLimit
+  recalibration): `00000007134b265abc8b959b1e54b99899acbe334dc8f6516a3a093b77bed7bc`
+  (two earlier test runs recorded different hashes,
+  `2a9a48dc2492d70e0187cd8a1972e6bda777d7653cfa237504cedc19c6c56ec8` and
+  `05b52b03589c11c30c909a9c8e33071344c61ce996c202554d139e81e417d45d`,
+  from before the SegWit-activation and powLimit-overflow fixes
+  respectively — each was a valid activation block under its own
+  rule set at the time; only the final hash above reflects the
+  fully-fixed M5 rules)
+- Activation block `bits`/target: `1d0fffff` (matches the recalibrated
   `BitAIActivationPowLimit`'s compact form exactly, confirmed via
-  `getblock`)
+  `getblock`; required ~7.5s to mine with an explicit `maxtries` on this
+  development machine — see `docs/TESTNET_RUNBOOK.md`)
 
 ## Consensus bugfix: historical retarget clamp (M5)
 
@@ -126,13 +128,63 @@ testnet4, signet, or regtest.
 
 ## Difficulty
 
-Activation block mines at target `7fffff00...00` (`bits=207fffff`),
-matching `BitAIActivationPowLimit` — confirmed live via `getblock`, not
-just by reading the config. Every block observed after activation in this
-test run retained the same easy target (no natural 2016-block retarget
-boundary was reached in the scope of this test), consistent with the
-"special-case exactly the activation height, fall through unmodified
-otherwise" design in `docs/CONSENSUS.md`.
+Activation block mines at target `0fffff00...00` (`bits=1d0fffff`),
+matching the M5-calibrated `BitAIActivationPowLimit` — confirmed live via
+`getblock`. Mining forward through the first natural post-activation
+retarget boundary (real height 225792) was tested directly (see the
+overflow bugfix below): `bits` stayed unchanged across that boundary
+(`1d0fffff` on both sides), the correct, stable outcome once the
+overflow bug was fixed. (An earlier report of this section, before that
+fix, described the activation target as `bits=207fffff` — that value was
+part of the bug and no longer applies; see below.)
+
+## Consensus bugfixes: retarget-multiply overflow and headers-sync clamp (M5)
+
+Two further bugs in the same family as the historical-retarget-clamp fix
+above, found by actually mining the live chain forward to its first
+natural post-activation retarget boundary rather than assuming the
+design was correct:
+
+1. **Retarget-multiply overflow.** BitAIcoin's original
+   `powLimit`/`BitAIActivationPowLimit` (`0x7fffff...ff`, ~1 bit of
+   headroom below the uint256 maximum) left no room for
+   `CalculateNextWorkRequired`'s intermediate `bnNew *= nActualTimespan`
+   multiply to avoid silently overflowing `arith_uint256` and wrapping
+   into an essentially arbitrary result. Confirmed live: at real height
+   225792, the retarget window's mix of real-2013 and synthetic
+   present-day timestamps produced a multi-year "actual timespan"
+   (clamped to the maximum 4x ratio), and multiplying the near-maximum
+   activation target by that ratio overflowed, wrapping to a target that
+   decoded as `bits=1e09debb` — a difficulty roughly 850,000x higher than
+   intended. Hand-computed the exact overflow-wrapped arithmetic in
+   Python and confirmed it matches the live result bit-for-bit, ruling
+   out any other explanation. Real Bitcoin's own `powLimit` values all
+   carry 32 bits of headroom for exactly this reason; `regtest`'s
+   identical-looking `0x7fffff...ff` value is not a safe counter-example,
+   since regtest also sets `fPowNoRetargeting = true` and never reaches
+   this arithmetic at all. Fixed by recalibrating both values to
+   `0x0000000fffff...ff` (28 bits of headroom). Verified live: mining
+   forward past height 225792 a second time produced a stable, unchanged
+   `bits` value across the boundary — see `docs/CONSENSUS.md` point 6.
+2. **Headers-sync anti-DoS clamp.** `PermittedDifficultyTransition`
+   (used by `headerssync.cpp`'s normal P2P headers-first sync, not
+   exercised by this project's own `-loadblock` bootstrap) has its own,
+   separate min/max envelope check against `consensus.powLimit`, missed
+   by the original historical-retarget-clamp fix. Fixed the same way
+   (historical/loosened split by height) — see `docs/CONSENSUS.md`
+   point 5. No live test of this path specifically (it requires a real
+   P2P peer relationship during initial sync, which Phase 1's node
+   topology doesn't exercise — see Known Limitations).
+
+**Practical side effect discovered while verifying these fixes:**
+`generatetoaddress`'s default `maxtries` (1,000,000) is too low for the
+calibrated `powLimit`'s ~2^28 average hash attempts and silently returns
+zero blocks instead of erroring; an explicit higher `maxtries` (e.g.
+`1000000000`) is required and now documented in
+`docs/TESTNET_RUNBOOK.md`. Also discovered `maxtries` is a budget shared
+across an entire multi-block `generatetoaddress` call, not a per-block
+allowance — mining N blocks reliably requires N separate single-block
+calls.
 
 ## Wallet transfer test
 
@@ -225,8 +277,18 @@ nodes. All three stopped cleanly at the end of the test
 6. **Difficulty ceiling (`consensus.powLimit`) and activation target
    (`BitAIActivationPowLimit`) are explicit development placeholders**
    (`PRODUCTION_DIFFICULTY_NOT_FINAL` in code comments), chosen for lab
-   convenience (sub-second block times), not as a considered choice for
-   any eventual public network.
+   convenience (single-digit-second block times with an explicit
+   `maxtries`, recalibrated in M5 from an earlier, unsafe near-instant
+   value that caused a retarget-multiply overflow — see the bugfix
+   section above), not as a considered choice for any eventual public
+   network.
+7. **No live test of the headers-sync anti-DoS clamp fix**
+   (`PermittedDifficultyTransition`, M5). This code path is only
+   exercised during normal P2P headers-first sync from a peer; Phase 1's
+   node topology (all three nodes seeded from the same `-loadblock`
+   import) never triggers it. Verified by code review and by mirroring
+   the same fix pattern already proven live in
+   `CalculateNextWorkRequired`, not by an independent live test.
 
 ## Historical mode status
 

@@ -116,7 +116,17 @@ bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t heig
         int64_t smallest_timespan = params.nPowTargetTimespan/4;
         int64_t largest_timespan = params.nPowTargetTimespan*4;
 
-        const arith_uint256 pow_limit = UintToArith256(params.powLimit);
+        // BitAIcoin: same historical/loosened split as CalculateNextWorkRequired's
+        // retarget clamp (see BitAIHistoricalPowLimit's comment in consensus/params.h)
+        // -- this function is also called from headerssync.cpp's presync/redownload
+        // anti-DoS difficulty-transition check, and using the loosened chain-wide
+        // powLimit there for a real historical (pre-fork) height widens its tolerance
+        // window past what real Bitcoin's own historical security margin intended.
+        // Every other chain leaves BitAIActivationHeight at INT_MAX, so this is
+        // unreachable/unaffected there.
+        const bool use_historical_pow_limit = params.BitAIActivationHeight != std::numeric_limits<int>::max()
+            && height < params.BitAIActivationHeight;
+        const arith_uint256 pow_limit = UintToArith256(use_historical_pow_limit ? params.BitAIHistoricalPowLimit : params.powLimit);
         arith_uint256 observed_new_target;
         observed_new_target.SetCompact(new_nbits);
 

@@ -184,20 +184,32 @@ bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadi
 
 ## Step 7 — Mine past activation and confirm the difficulty transition
 
+**Pass an explicit, large `maxtries`.** Since Phase 1 M5, `powLimit`/
+`BitAIActivationPowLimit` need ~2^28 average hash attempts (see
+`docs/CONSENSUS.md` point 6) — genuinely mineable in single-digit seconds
+on ordinary hardware, but `generatetoaddress`'s *default* `maxtries`
+(1,000,000) is far too low and will silently return an empty array
+(zero blocks mined) instead of an error. Always pass an explicit value
+(e.g. `1000000000`) as the third argument. Also note `maxtries` is a
+budget *shared across the whole call* when mining more than one block at
+once, not a per-block allowance — mining N blocks reliably means calling
+`generatetoaddress 1 <addr> <maxtries>` in a loop N times, not
+`generatetoaddress N <addr> <maxtries>` once.
+
 ```bash
 NODE_A="bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir"
-ADDR=$($NODE_A -rpcwallet=<wallet> getnewaddress "" legacy)   # legacy (P2PKH) -- see docs/CONSENSUS.md open question
-$NODE_A generatetoaddress 1 "$ADDR"                            # mines block 225430 (activation)
-$NODE_A getblock $($NODE_A getbestblockhash) | grep '"bits"'   # confirm easy activation target
+ADDR=$($NODE_A -rpcwallet=<wallet> getnewaddress "" bech32)    # native SegWit -- active from the fork point onward, see docs/CONSENSUS.md
+$NODE_A generatetoaddress 1 "$ADDR" 1000000000                 # mines block 225430 (activation)
+$NODE_A getblock $($NODE_A getbestblockhash) | grep '"bits"'   # confirm the calibrated activation target
 ```
 
 ## Step 8 — Mature a coinbase and test cross-node transfers (M4)
 
 ```bash
-$NODE_A generatetoaddress 100 "$ADDR"    # maturity
-ADDR_B=$(bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-b -rpcwallet=<wallet> getnewaddress "" legacy)
-$NODE_A -rpcwallet=<wallet> sendtoaddress "$ADDR_B" 1.0
-$NODE_A generatetoaddress 1 "$ADDR"      # confirm it
+for i in $(seq 1 100); do $NODE_A generatetoaddress 1 "$ADDR" 1000000000 >/dev/null; done   # maturity
+ADDR_B=$(bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-b -rpcwallet=<wallet> getnewaddress "" bech32)
+$NODE_A -rpcwallet=<wallet> -named sendtoaddress address="$ADDR_B" amount=1.0 fee_rate=5
+$NODE_A generatetoaddress 1 "$ADDR" 1000000000   # confirm it
 
 # on Node B:
 bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-b -rpcwallet=<wallet> getbalance
@@ -206,14 +218,12 @@ bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-b -rpcwalle
 # getblockcount / getbestblockhash / getbalance-after-transfer.
 ```
 
-**Use legacy (P2PKH) addresses, not bech32.** A bech32 (P2WPKH) address
-produces a witness-carrying transaction that is rejected at this chain
-height (`"unexpected-witness"`), since SegWit is inherited dormant — see
-`docs/CONSENSUS.md`'s open question. If a wallet ever gets an
-un-minable transaction stuck in its own auto-rebroadcast (it retries on
-every load, re-poisoning the mempool even after `mempool.dat` is
-cleared), abandon that wallet and create a fresh one rather than trying
-to evict the specific transaction.
+**Native bech32 (P2WPKH) addresses work as of Phase 1 M5** — SegWit
+activates at the fork point itself (see `docs/CONSENSUS.md`'s "Resolved"
+section), so there is no longer a need to use legacy (P2PKH) addresses.
+`sendtoaddress` may also need an explicit `fee_rate` (as above) on a
+freshly-bootstrapped chain, since fee estimation has no history to work
+from yet and errors with `"Fee estimation failed"` otherwise.
 
 ## Cleanup
 

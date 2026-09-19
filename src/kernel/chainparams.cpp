@@ -257,9 +257,35 @@ public:
         // nonce. Real historical blocks below the activation height are unaffected: their
         // actual difficulty was always vastly stricter than even mainnet's own powLimit, let
         // alone this more permissive lab ceiling, so relaxing it cannot invalidate anything
-        // that already validated. PRODUCTION_DIFFICULTY_NOT_FINAL -- a lab-appropriate choice,
-        // not a considered one for any eventual public network.
-        consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+        // that already validated.
+        //
+        // NOT a "maximally permissive" value close to the uint256 maximum, and NOT mainnet's
+        // real (much stricter) powLimit either -- a deliberate middle ground. This is a real
+        // bug found and fixed in Phase 1 M5, in two stages:
+        //
+        // (1) An earlier, much looser value (0x7fffff...ff, only ~1 bit of headroom below the
+        //     256-bit maximum) left no room for CalculateNextWorkRequired's intermediate
+        //     `bnNew *= nActualTimespan` multiply (nActualTimespan can be as large as
+        //     nPowTargetTimespan*4, ~2^23) to avoid silently overflowing arith_uint256 and
+        //     wrapping into an essentially arbitrary difficulty -- confirmed live: BitAIcoin's
+        //     first post-activation retarget (real height 225792) computed a wildly,
+        //     unpredictably HARDER target than intended this way. Fix requires at least ~23
+        //     bits of headroom below the 256-bit maximum for that multiply to never overflow.
+        // (2) Reusing mainnet's real powLimit verbatim (32 bits of headroom, genesis-era
+        //     difficulty) was tried next, on the assumption it would still be "trivially
+        //     mineable" the way it was for Bitcoin's own launch -- but empirically,
+        //     `generatetoaddress`'s default CPU miner exhausted its default maxtries without
+        //     finding a single valid nonce at that difficulty on this development machine
+        //     (genesis-era difficulty needs ~2^32 average hash attempts; bitcoind's simple,
+        //     single-threaded internal miner is far slower than 2013-era ASICs at this task).
+        //
+        // 28 bits of headroom (7 leading zero hex digits) is the chosen middle ground: safely
+        // ~5 bits above the ~23-bit minimum needed to avoid the M5 overflow (comfortable
+        // margin, not a razor's-edge value), while needing only ~2^28 average hash attempts --
+        // empirically a few seconds on this development machine's CPU miner, not minutes.
+        // PRODUCTION_DIFFICULTY_NOT_FINAL -- a lab-appropriate choice, not a considered one
+        // for any eventual public network.
+        consensus.powLimit = uint256{"0000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
         consensus.nPowTargetSpacing = 10 * 60;
         consensus.fPowAllowMinDifficultyBlocks = false;
@@ -316,9 +342,12 @@ public:
         assert(consensus.SegwitHeight == consensus.BitAIActivationHeight);
         // Easy, lab-appropriate target for exactly the activation block; every block after
         // it resumes the ordinary 2016-block retarget algorithm using consensus.powLimit as
-        // the floor. PRODUCTION_DIFFICULTY_NOT_FINAL -- this value is a development default,
-        // not a considered choice for any eventual public network.
-        consensus.BitAIActivationPowLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+        // the floor. Deliberately equal to consensus.powLimit itself (both now real mainnet's
+        // proven-safe value, see its comment above) -- the activation block is no easier than
+        // any other block is already allowed to be by the chain-wide ceiling, which is exactly
+        // what keeps this overflow-safe. PRODUCTION_DIFFICULTY_NOT_FINAL -- this value is a
+        // development default, not a considered choice for any eventual public network.
+        consensus.BitAIActivationPowLimit = uint256{"0000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
         // ASCII "BAI", nonzero on BitAIcoin only. Folded into the legacy/BIP143 sighash for
         // every input spent at height >= BitAIActivationHeight (see REPLAY_PROTECTION.md).
         consensus.BitAIForkId = 0x424149;
