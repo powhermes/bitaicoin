@@ -69,11 +69,16 @@ were thinking and why" instead of nothing.
 
 ## What would need to happen before any of this is built
 
-1. Resolve the open SegWit/Taproot activation-timing question in
-   `docs/CONSENSUS.md`.
-2. Explicit scoping and sign-off from the user on which settlement
-   mechanism to pursue, since this is security-critical, user-facing
-   financial infrastructure — not a decision to make unilaterally.
-3. A dedicated design/plan phase (Goal/Findings/Plan, same as Phase 1),
-   informed by whatever real usage patterns or requirements emerge from
-   actually running the Phase 1 Synthetic Lab network.
+1. ~~Resolve the open SegWit/Taproot activation-timing question in
+   `docs/CONSENSUS.md`.~~ **Done (Phase 1 M5).**
+2. ~~Explicit scoping and sign-off from the user on which settlement
+   mechanism to pursue.~~ **Done.** Custodial/semi-custodial ledger
+   backend chosen for v1, with the marketplace-facing interface designed
+   so a bilateral-channel backend can replace it later without an API
+   change — see `docs/BITAI_PAYMENT_DESIGN.md` §9-10.
+3. ~~A dedicated design/plan phase.~~ **Done.** See
+   `docs/BITAI_PAYMENT_DESIGN.md` — a full design (interfaces, state
+   machines, ledger schema, receipt format, custody assumptions,
+   duplication analysis) grounded directly against the existing
+   `agent-marketplace` codebase's `PaymentAdapter` boundary and
+   conformance suite. **Design only — no production code yet.**
