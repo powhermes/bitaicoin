@@ -173,9 +173,17 @@ and this plan's scope boundary):
   vector `.svg`) currently exists for the BitAIcoin mark, so
   `src/qt/res/src/bitcoin.svg` would need a proper vector replacement
   rather than a naive raster swap.
-- BIP44 HD wallet coin-type registration.
+- ~~BIP44 HD wallet coin-type registration.~~ **Done, partially.**
+  Wallets now derive at a dedicated coin type (`BitAIForkId`, ASCII
+  "BAI" = 4342089) instead of falling into Bitcoin's generic "testnet"
+  bucket (coin_type 1', shared with real testnet3/testnet4/signet/regtest)
+  — see `src/wallet/walletutil.cpp`'s `GenerateWalletDescriptor`. What's
+  still deferred: actually registering this number with the real,
+  external SLIP-44 registry (https://github.com/satoshilabs/slips),
+  which is appropriate only for a real, publicly-launched coin, not a
+  private Phase 1 lab network.
 - Taproot-domain-separated signing (structurally rejected instead, see
-  `docs/CONSENSUS.md` §4).
+  `docs/CONSENSUS.md` §7).
 - Any L402/agent-payment implementation (architecture notes only, see
   `docs/AGENT_PAYMENTS.md`).
 - Any public launch, seed node, or external network exposure of any kind.

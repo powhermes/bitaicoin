@@ -67,8 +67,19 @@ WalletDescriptor GenerateWalletDescriptor(const CExtPubKey& master_key, const Ou
     } // no default case, so the compiler can warn about missing cases
     assert(!desc_prefix.empty());
 
-    // Mainnet derives at 0', testnet and regtest derive at 1'
-    if (Params().IsTestChain()) {
+    // Mainnet derives at 0', testnet and regtest derive at 1'. BitAIcoin derives at its own
+    // coin type instead of falling into that generic "testnet" bucket -- BitAIcoin is not a
+    // Bitcoin test network (it's an independent chain that happens to share history with
+    // Bitcoin below its fork point), so lumping its wallets in with real
+    // testnet3/testnet4/signet/regtest under coin_type 1' would misrepresent that. This is
+    // NOT a registered SLIP-44 coin type (https://github.com/satoshilabs/slips) -- that
+    // registration is for real, publicly-launched coins, and Phase 1 is a private lab network;
+    // registering prematurely would be presumptuous. Reuses BitAIForkId (ASCII "BAI",
+    // 0x424149) for a self-consistent, collision-avoiding identity marker, comfortably within
+    // BIP32's 31-bit hardened-index limit. Every other chain is unaffected.
+    if (Params().GetChainType() == ChainType::BITAICOIN) {
+        desc_prefix += "/" + std::to_string(Params().GetConsensus().BitAIForkId) + "h";
+    } else if (Params().IsTestChain()) {
         desc_prefix += "/1h";
     } else {
         desc_prefix += "/0h";
