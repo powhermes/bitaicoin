@@ -95,7 +95,7 @@ instead works as an explicit, one-time import:
    BitAIcoin's `b778d811` — without touching any payload bytes. This step
    is load-bearing: a `-loadblock` import under `-chain=bitaicoin` rejects
    any file still framed with Bitcoin's magic.
-3. **Fresh BitAIcoin datadir import**: `bitcoind -chain=bitaicoin
+3. **Fresh BitAIcoin datadir import**: `bitaicoind -chain=bitaicoin
    -loadblock=<remagicked file>` validates the entire 225,430-block file
    cleanly, because every rule governing those heights under
    `CBitAIcoinParams` is byte-identical to mainnet's (same genesis, same
@@ -112,7 +112,7 @@ See `docs/TESTNET_RUNBOOK.md` for the literal commands.
 
 ## Node/network topology (Phase 1)
 
-Three independent `bitcoind -chain=bitaicoin` nodes (Node A/B/C), each
+Three independent `bitaicoind -chain=bitaicoin` nodes (Node A/B/C), each
 with a datadir seeded from the same bootstrap import (B and C were seeded
 by directly copying Node A's already-validated `blocks/`+`chainstate/`
 directories rather than re-running the P2P import a second and third
@@ -147,8 +147,20 @@ site that doesn't need to make a decision about it.
 Explicitly deferred, not forgotten (per the original project directive
 and this plan's scope boundary):
 
-- Binary/daemon renaming — `bitcoind`/`bitcoin-cli` are unchanged names,
-  selected via `-chain=bitaicoin`.
+- ~~Binary/daemon renaming — `bitcoind`/`bitcoin-cli` are unchanged
+  names.~~ **Done.** Both are now built and installed as
+  `bitaicoind`/`bitaicoin-cli` (`src/CMakeLists.txt`'s `OUTPUT_NAME`
+  property on each target, chosen over renaming the CMake targets
+  themselves so every `target_link_libraries`/`install_binary_component`
+  reference stays unchanged). The `bitcoin` multi-tool dispatcher's
+  `node`/`rpc` subcommands (`src/bitcoin.cpp`) were updated to match and
+  verified live. Not renamed: `bitcoin-tx`/`bitcoin-util`/`bitcoin-wallet`
+  (out of this item's original scope; `bitcoin-node`/`bitcoin-gui`, the
+  multiprocess-mode binaries, aren't built since Phase 1 uses
+  `-DENABLE_IPC=OFF`), and man-page *installation* (`cmake --install`)
+  still files pages under the old names, since that keys off the CMake
+  target name rather than `OUTPUT_NAME` — irrelevant so far since Phase 1
+  has never used `cmake --install`.
 - GUI/Qt branding (Phase 1 builds with `BUILD_GUI=OFF`). The project's
   logo and mark (`doc/bitaicoin_logo.png`, `doc/bitaicoin_icon.png`) are
   used for documentation/repo branding only in Phase 1 — they have not

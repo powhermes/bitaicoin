@@ -9,9 +9,12 @@ testnet4, signet, and regtest as they ship in v31.1.
 ## Selecting the chain
 
 ```
-bitcoind -chain=bitaicoin ...
-bitcoin-cli -chain=bitaicoin ...
+bitaicoind -chain=bitaicoin ...
+bitaicoin-cli -chain=bitaicoin ...
 ```
+
+(`bitcoind`/`bitcoin-cli` are built and installed as `bitaicoind`/`bitaicoin-cli` —
+see `docs/ARCHITECTURE.md`'s "binary/daemon renaming" note.)
 
 Per-chain datadir subdirectory: `bitaicoin/` (e.g. `<datadir>/bitaicoin/`),
 following the same convention as `testnet3/`, `signet/`, `regtest/`.

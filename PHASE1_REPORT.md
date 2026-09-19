@@ -4,6 +4,13 @@ Status: **complete**. Every milestone below has a passing automated or
 live-verified check behind it — nothing here is asserted from source
 review alone unless explicitly labeled as such in Known Limitations.
 
+**A note on binary names below:** the `bitcoind`/`bitcoin-cli` references
+in this report describe events as they actually happened at the time
+(M4 and earlier M5 testing), before those binaries were renamed to
+`bitaicoind`/`bitaicoin-cli` — see `docs/ARCHITECTURE.md`'s "binary/daemon
+renaming" note. Current builds produce the renamed binaries; this report
+is left as an accurate historical record rather than rewritten.
+
 ## Upstream
 
 - Repository: https://github.com/bitcoin/bitcoin

@@ -15,7 +15,11 @@ to change.
 
 - A build of this repo's `bitaicoin-phase1` branch (`cmake -B build
   -DBUILD_GUI=OFF -DENABLE_IPC=OFF && cmake --build build -j$(nproc)`; on
-  macOS with Homebrew Boost/libevent/sqlite/pkgconf installed).
+  macOS with Homebrew Boost/libevent/sqlite/pkgconf installed). Produces
+  `build/bin/bitaicoind` and `build/bin/bitaicoin-cli` — renamed from
+  stock `bitcoind`/`bitcoin-cli` (see `docs/ARCHITECTURE.md`'s
+  "binary/daemon renaming" note); every command below assumes these are
+  on your `PATH` or invoked with their full `build/bin/` path.
 - Outbound internet access, for step 1's real Bitcoin P2P sync.
 - Enough disk space for a ~225,430-block prefix of real Bitcoin history
   (the linearized+remagicked bootstrap file used here was
@@ -110,7 +114,7 @@ producing a corrupt file if anything is out of alignment. It should report
 
 ```bash
 mkdir -p ~/Downloads/bitaicoin-dev/bitaicoin-datadir
-bitcoind -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir \
+bitaicoind -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir \
   -loadblock=~/Downloads/bitaicoin-dev/m0-linearize-work/bitaicoin-genesis-225429.remagicked.dat \
   -server=1 -maxconnections=0 -daemon=0
 ```
@@ -120,9 +124,9 @@ importing, or logs completion in `debug.log`), then verify before doing
 anything else:
 
 ```bash
-bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir getblockcount
+bitaicoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir getblockcount
 # expect 225430
-bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir getblockhash 225429
+bitaicoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir getblockhash 225429
 # expect 0000000000000366ce98ca28338900094e8cbf445776253181749f782546d006
 ```
 
@@ -138,7 +142,7 @@ see `PHASE1_REPORT.md`'s Known Limitations). The reliable approach used
 here: stop Node A cleanly, then copy its already-validated data directly:
 
 ```bash
-bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir stop
+bitaicoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir stop
 mkdir -p ~/Downloads/bitaicoin-dev/node-b/bitaicoin ~/Downloads/bitaicoin-dev/node-c/bitaicoin
 cp -R ~/Downloads/bitaicoin-dev/bitaicoin-datadir/bitaicoin/blocks     ~/Downloads/bitaicoin-dev/node-b/bitaicoin/
 cp -R ~/Downloads/bitaicoin-dev/bitaicoin-datadir/bitaicoin/chainstate ~/Downloads/bitaicoin-dev/node-b/bitaicoin/
@@ -153,15 +157,15 @@ Ports used in this run: Node A = 28333/28332 (P2P/RPC), Node B =
 two, explicitly (no DNS seeds, no public peering):
 
 ```bash
-bitcoind -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir \
+bitaicoind -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir \
   -daemon -server=1 -listen=1 -port=28333 -rpcport=28332 -dbcache=300 \
   -maxconnections=32 -connect=127.0.0.1:28433 -connect=127.0.0.1:28533
 
-bitcoind -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-b \
+bitaicoind -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-b \
   -daemon -server=1 -listen=1 -port=28433 -rpcport=28432 -dbcache=300 \
   -maxconnections=32 -connect=127.0.0.1:28333 -connect=127.0.0.1:28533
 
-bitcoind -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-c \
+bitaicoind -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-c \
   -daemon -server=1 -listen=1 -port=28533 -rpcport=28532 -dbcache=300 \
   -maxconnections=32 -connect=127.0.0.1:28333 -connect=127.0.0.1:28433
 ```
@@ -178,7 +182,7 @@ mesh (4 peers each: 2 manual outbound + 2 inbound, confirmed via
 Verify convergence:
 
 ```bash
-bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir getpeerinfo | grep -c '"id"'
+bitaicoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir getpeerinfo | grep -c '"id"'
 # expect 4 on each node
 ```
 
@@ -197,7 +201,7 @@ once, not a per-block allowance — mining N blocks reliably means calling
 `generatetoaddress N <addr> <maxtries>` once.
 
 ```bash
-NODE_A="bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir"
+NODE_A="bitaicoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/bitaicoin-datadir"
 ADDR=$($NODE_A -rpcwallet=<wallet> getnewaddress "" bech32)    # native SegWit -- active from the fork point onward, see docs/CONSENSUS.md
 $NODE_A generatetoaddress 1 "$ADDR" 1000000000                 # mines block 225430 (activation)
 $NODE_A getblock $($NODE_A getbestblockhash) | grep '"bits"'   # confirm the calibrated activation target
@@ -207,12 +211,12 @@ $NODE_A getblock $($NODE_A getbestblockhash) | grep '"bits"'   # confirm the cal
 
 ```bash
 for i in $(seq 1 100); do $NODE_A generatetoaddress 1 "$ADDR" 1000000000 >/dev/null; done   # maturity
-ADDR_B=$(bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-b -rpcwallet=<wallet> getnewaddress "" bech32)
+ADDR_B=$(bitaicoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-b -rpcwallet=<wallet> getnewaddress "" bech32)
 $NODE_A -rpcwallet=<wallet> -named sendtoaddress address="$ADDR_B" amount=1.0 fee_rate=5
 $NODE_A generatetoaddress 1 "$ADDR" 1000000000   # confirm it
 
 # on Node B:
-bitcoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-b -rpcwallet=<wallet> getbalance
+bitaicoin-cli -chain=bitaicoin -datadir=~/Downloads/bitaicoin-dev/node-b -rpcwallet=<wallet> getbalance
 
 # repeat B -> C similarly, then confirm all three nodes report the same
 # getblockcount / getbestblockhash / getbalance-after-transfer.
@@ -229,7 +233,7 @@ from yet and errors with `"Fee estimation failed"` otherwise.
 
 ```bash
 for d in ~/Downloads/bitaicoin-dev/bitaicoin-datadir ~/Downloads/bitaicoin-dev/node-b ~/Downloads/bitaicoin-dev/node-c; do
-  bitcoin-cli -chain=bitaicoin -datadir="$d" stop
+  bitaicoin-cli -chain=bitaicoin -datadir="$d" stop
 done
 ```
 

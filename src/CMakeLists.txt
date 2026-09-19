@@ -317,6 +317,12 @@ if(BUILD_DAEMON)
     bitcoin_node
     $<TARGET_NAME_IF_EXISTS:bitcoin_wallet>
   )
+  # BitAIcoin: rename the produced binary to bitaicoind without renaming the CMake
+  # target itself, so every target_link_libraries/install_binary_component/
+  # add_windows_* reference above keeps working unchanged. See
+  # docs/ARCHITECTURE.md's "binary/daemon renaming" note for what this does and
+  # does not cover (man-page installation still keys off the CMake target name).
+  set_target_properties(bitcoind PROPERTIES OUTPUT_NAME "bitaicoind")
   install_binary_component(bitcoind HAS_MANPAGE)
 endif()
 if(ENABLE_IPC AND BUILD_DAEMON)
@@ -358,6 +364,8 @@ if(BUILD_CLI)
     libevent::core
     libevent::extra
   )
+  # BitAIcoin: see the matching comment on the bitcoind target above.
+  set_target_properties(bitcoin-cli PROPERTIES OUTPUT_NAME "bitaicoin-cli")
   install_binary_component(bitcoin-cli HAS_MANPAGE)
 endif()
 
