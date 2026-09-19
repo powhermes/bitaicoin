@@ -1273,6 +1273,141 @@ resolve, since the two serve different, non-overlapping readers.
 
 ---
 
+## 17. Hard-gate hardening: packaging, key rotation, and adoption proof
+
+Directive for this phase: treat §15/§16 as proven and frozen, do not
+start bilateral channels, and answer one sharp question before revisiting
+them at all — *can an outside developer actually adopt this, against a
+remotely running instance, without repository knowledge?* Everything
+below either answers that question with a real, repeatable test, or
+closes a gap that would have made a "yes" dishonest.
+
+### Packaging: `@bitai/pay402`
+
+`sdk/client` and `sdk/server` no longer import anything from `../../src`
+— they carry their own vendored copies of the handful of pure
+primitives they need (`sdk/protocol/{types,crypto,proof,
+signed-request-material}.ts`), kept byte-identical to the real source of
+truth by a runtime + type-level check in
+`test/pay402-compatibility-baseline.test.ts`. `sdk/package.json`
+declares the package as `@bitai/pay402`, its own dependencies
+(`@noble/curves`, `@noble/hashes`; `fastify` as an optional peer, needed
+only for the one framework-specific adapter file), and its own build
+(`sdk/tsconfig.json` → `dist/`). This was verified, not just asserted:
+`sdk/` was copied to a directory outside this repo, `npm install`ed and
+`npm run build` + `npm pack`ed there in complete isolation, and the
+resulting tarball installed into a second, separate temp project —
+proving no hidden dependency on this monorepo's own node_modules or
+tsconfig. `sdk/docs/PROTOCOL.md`'s Versioning section states the
+semver/protocol-compatibility policy explicitly, including a
+machine-readable copy in `package.json`'s own `bitaiPay402` field.
+
+### Key rotation
+
+New `signing_keys` table (migration `0007`) plus `SigningKeyStore`:
+exactly one `ACTIVE` key at a time (a real partial-unique-index
+constraint, not just application discipline), every prior key retained
+as `RETIRED` — public key only, never deleted, retention pruning is
+explicitly left open. An operator rotates by running `pnpm
+signing-keys:rotate` (prints a fresh keypair) and restarting the process
+with the new `RECEIPT_SIGNING_KEY_HEX`/`_ID` — `SigningKeyStore.
+ensureActive`, called from an `onReady` hook so `buildApp` stays
+synchronous, does the actual retire-and-activate atomically the moment
+it sees a genuinely new key id. Two new discovery endpoints,
+`GET /v1/signing-keys` and `GET /v1/signing-keys/:keyId`, sit alongside
+the existing `GET /v1/signing-key` (which now answers from the store,
+still returning only the active key — unchanged shape). Both
+`Pay402Client` and `Pay402Guard` were updated to resolve **the specific
+key a given proof names** (its own `signingKeyId`), not "whatever is
+currently active" — verified end to end in
+`test/signing-key-rotation.test.ts`: a proof signed under key A still
+verifies after the deployment rotates to key B.
+
+### A real, pre-existing bug found and fixed: rate limiting was inert
+
+Adding a stricter, principal-scoped rate limit to `POST
+/v1/authorizations` (30/min, on top of the app-wide 300/min default)
+surfaced that the app-wide limiter had **never actually applied to any
+route**, since before this phase. Root cause: `app.register(rateLimit,
+...)` followed by route declarations directly on the same `app`
+instance, in the same synchronous tick, with nothing awaiting the
+registration (`buildApp` is deliberately synchronous). A minimal repro
+during this work confirmed it precisely: identical setup, the only
+difference being whether routes are declared inside a nested
+`app.register(async (instance) => {...})` block or directly on `app` —
+`x-ratelimit-*` response headers go from permanently `undefined` to
+present and correctly decrementing. Fix: `buildApp` now registers
+`@fastify/rate-limit` first, then wraps every route registration
+(marketplace-shaped, Pay-402, signing-key discovery) inside one nested
+`.register()` block. Both the app-wide default and the new
+route-specific limit are now genuinely enforced, covered by
+`test/pay402-rate-limit.test.ts`. This was a real, live security gap in
+already-shipped code, not something introduced by this phase's work —
+flagged here rather than fixed silently, per this project's own
+"document architecture discrepancies" discipline.
+
+### Fuzzing and concurrency
+
+`sdk/test/pay402-fuzz-and-concurrency.test.ts` (property-based, via
+`fast-check`): thousands of generated malformed challenges and proof
+headers against `validateChallenge` and `Pay402Guard.verifyAndRedeem`,
+asserting only the SDK's own typed errors/failure reasons are ever
+produced, never an uncaught exception; a tampered-field sweep over a
+genuinely-signed proof, confirming every mutated field independently
+fails verification; challenge-expiry boundary cases (expires-now,
+negative/zero amount). Concurrency: `InMemoryRedeemedReferenceStore.
+tryRedeem` proven atomic under 100 concurrent callers (exactly one
+wins), with a deliberately-broken has()/add() implementation run
+alongside it under the same load to make the contrast a real, running
+assertion rather than a claim in a comment.
+
+### The two adoption hard gates
+
+1. **Clean-room adopter test**
+   (`sdk/test/pay402-clean-room.live.test.ts`, `BITAI_LIVE_CLEANROOM=1
+   pnpm test:live`): a real, separately-spawned BitAI Payment process
+   (`BITAI_PAYMENT_MODE=pay402-only` — a new main.ts mode, backed by a
+   real Postgres database, requiring no BitAIcoin node at all, since
+   Pay-402 never touches BitAIcoin) plus a real npm-packaged, npm-installed
+   consumer project whose service/payer scripts import only
+   `@bitai/pay402/client` and `@bitai/pay402/server`, following
+   `sdk/README.md`'s documented example alone. Passes, including a
+   clean `INSUFFICIENT_BALANCE` failure for an unfunded principal.
+2. **Independent second implementation**
+   (`sdk/test/pay402-independent-implementation.test.ts`): a payer and
+   payee written from scratch against `sdk/docs/PROTOCOL.md` alone —
+   different code shape (plain functions, its own canonicalization/
+   signing helpers), sharing no code with `sdk/client` or `sdk/server` —
+   complete a real payment and correctly refuse a replay, against the
+   real, unmodified server. This is the test that answers "is the
+   *protocol* adoptable," as distinct from "does this one SDK work."
+
+Both pass. Honest limitation, stated rather than glossed over: no
+genuine second-*machine* test was run (no second host/VM/container
+available in this environment). What was verified instead: `main.ts`
+already binds `0.0.0.0` by default, and was manually confirmed reachable
+by a second, independently `npm install`ed process at the host's real
+LAN IP rather than loopback — real IP-level routing, not a distinct
+physical or virtual host. `sdk/docs/PROTOCOL.md`'s "Hardening and
+adoption evidence" section names precisely what a genuine multi-machine
+test would still need to confirm before a production multi-region
+deployment.
+
+### The hard gate's answer
+
+Both required, independent proofs pass: an outside developer can
+integrate BitAI Pay-402 from the SDK docs alone, and the protocol itself
+— not just this one implementation of it — is independently
+adoptable. Per the standing instruction, this is now the evidence to
+weigh before any bilateral-channel work: is custody actually the thing
+blocking adoption, or not? Nothing in this phase's findings points at
+custody as a blocker — every friction point found and fixed here
+(inert rate limiting, no key-rotation story, no real packaging, silent
+error strings) was an SDK/operational-maturity gap, not a trust-model
+one. That question is answered by what happens next, not decided here.
+
+---
+
 ## What duplicates existing functionality (and should not be built twice)
 
 1. **Authorization/capture for marketplace contracts** — fully provided
@@ -1330,8 +1465,19 @@ resolve, since the two serve different, non-overlapping readers.
   submits their public key. Deliberately out of scope for the
   marketplace-mediated acceptance test (§14), which only needs one
   `TENANT` principal.
-- **Key rotation and per-principal rate limiting** — real operational
-  needs, don't change any interface shape above, not designed here.
+- ~~Key rotation and per-principal rate limiting~~ — **done in §17**:
+  `SigningKeyStore` + `GET /v1/signing-keys(/:keyId)`, and a
+  principal-scoped limit on `POST /v1/authorizations`. Left here,
+  struck through rather than deleted, so the history of "this was once
+  an open question" stays legible.
+- **Signing-key retention/pruning policy** — v17 retains every retired
+  key's public key indefinitely; a pruning policy tied to a receipt/
+  proof retention window is real future work, not decided here.
+- **Genuine multi-machine deployment testing** — §17's clean-room test
+  proves real npm packaging and real IP-level (non-loopback) reachability
+  on one machine; a real second host/VM/container test, and confirming
+  no code path assumes shared filesystem state or in-process memory
+  across instances, is still open.
 - **HD wallet vs. per-address `getnewaddress` calls** — an
   implementation detail of `CustodialLedgerEngine`, left open since it
   doesn't affect anything above the `SettlementEngine` line.
