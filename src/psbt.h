@@ -1419,15 +1419,24 @@ PrecomputedTransactionData PrecomputePSBTData(const PartiallySignedTransaction& 
 /** Checks whether a PSBTInput is already signed by checking for non-null finalized fields. */
 bool PSBTInputSigned(const PSBTInput& input);
 
-/** Checks whether a PSBTInput is already signed by doing script verification using final fields. */
-bool PSBTInputSignedAndVerified(const PartiallySignedTransaction& psbt, unsigned int input_index, const PrecomputedTransactionData* txdata);
+/** Checks whether a PSBTInput is already signed by doing script verification using final fields.
+ *
+ * fork_id must match what the input was actually signed with (BitAIcoin's
+ * replay-protection fold, 0 on every non-BitAIcoin chain) or a correctly
+ * signed input will verify as not-yet-signed. */
+bool PSBTInputSignedAndVerified(const PartiallySignedTransaction& psbt, unsigned int input_index, const PrecomputedTransactionData* txdata, uint32_t fork_id = 0);
 
 /** Signs a PSBTInput, verifying that all provided data matches what is being signed.
  *
  * txdata should be the output of PrecomputePSBTData (which can be shared across
  * multiple SignPSBTInput calls). If it is nullptr, a dummy signature will be created.
+ *
+ * fork_id is BitAIcoin's replay-protection fold into the sighash (0 on every
+ * non-BitAIcoin chain, and for callers -- e.g. FinalizePSBT's completeness
+ * pass -- that only assemble already-present signatures via a provider with
+ * no real keys, where no new signature is ever computed).
  **/
-[[nodiscard]] PSBTError SignPSBTInput(const SigningProvider& provider, PartiallySignedTransaction& psbt, int index, const PrecomputedTransactionData* txdata, std::optional<int> sighash = std::nullopt, SignatureData* out_sigdata = nullptr, bool finalize = true);
+[[nodiscard]] PSBTError SignPSBTInput(const SigningProvider& provider, PartiallySignedTransaction& psbt, int index, const PrecomputedTransactionData* txdata, std::optional<int> sighash = std::nullopt, SignatureData* out_sigdata = nullptr, bool finalize = true, uint32_t fork_id = 0);
 
 /**  Reduces the size of the PSBT by dropping unnecessary `non_witness_utxos` (i.e. complete previous transactions) from a psbt when all inputs are segwit v1. */
 void RemoveUnnecessaryTransactions(PartiallySignedTransaction& psbtx);

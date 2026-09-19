@@ -188,6 +188,15 @@ PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std
 
     const PrecomputedTransactionData& txdata = PrecomputePSBTData(psbtx);
 
+    // BitAIcoin replay protection: resolve fork_id the same way
+    // signrawtransactionwithkey does -- from the height this transaction
+    // would confirm at. Every non-BitAIcoin chain leaves
+    // BitAIActivationHeight at INT_MAX, so this is always 0 there.
+    ChainstateManager& chainman = EnsureAnyChainman(context);
+    const Consensus::Params& consensusParams = chainman.GetConsensus();
+    const int nHeight = WITH_LOCK(chainman.GetMutex(), return chainman.ActiveHeight()) + 1;
+    const uint32_t fork_id = (nHeight >= consensusParams.BitAIActivationHeight) ? consensusParams.BitAIForkId : 0;
+
     for (unsigned int i = 0; i < psbtx.tx->vin.size(); ++i) {
         if (PSBTInputSigned(psbtx.inputs.at(i))) {
             continue;
@@ -198,7 +207,7 @@ PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std
         // We only actually care about those if our signing provider doesn't hide private
         // information, as is the case with `descriptorprocesspsbt`
         // Only error for mismatching sighash types as it is critical that the sighash to sign with matches the PSBT's
-        if (SignPSBTInput(provider, psbtx, /*index=*/i, &txdata, sighash_type, /*out_sigdata=*/nullptr, finalize) == common::PSBTError::SIGHASH_MISMATCH) {
+        if (SignPSBTInput(provider, psbtx, /*index=*/i, &txdata, sighash_type, /*out_sigdata=*/nullptr, finalize, fork_id) == common::PSBTError::SIGHASH_MISMATCH) {
             throw JSONRPCPSBTError(common::PSBTError::SIGHASH_MISMATCH);
         }
     }

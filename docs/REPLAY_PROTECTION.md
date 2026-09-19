@@ -75,10 +75,13 @@ signature itself:
   `CScriptCheck` and into the script-execution cache key (so a
   fork-id=0 and fork-id=BAI check of the identical script never share a
   cache hit).
-- **Wallet signing** (`CWallet::SignTransaction`, `src/wallet/wallet.cpp`):
-  computed from `GetLastBlockHeight() + 1`.
-- **RPC signing** (`signrawtransactionwithkey`, `src/rpc/rawtransaction.cpp`):
-  computed from the active chain's height + 1.
+- **Wallet signing** (`CWallet::SignTransaction`, `CWallet::FillPSBT`,
+  `src/wallet/wallet.cpp`): both resolve fork_id via the shared
+  `CWallet::ResolveForkId()` helper, from `m_last_block_processed_height +
+  1` (0 if the wallet has never been attached to any chain).
+- **RPC signing** (`signrawtransactionwithkey` and `descriptorprocesspsbt`'s
+  `ProcessPSBT`, `src/rpc/rawtransaction.cpp`): computed from the active
+  chain's height + 1.
 
 Because it's derived from consensus-visible height rather than a bit an
 attacker controls, there is no way to construct a transaction that
@@ -119,6 +122,70 @@ build/bin/test_bitcoin --run_test=bitaicoin_forkid_tests
 
 All three cases pass as part of the full `test_bitcoin` suite (see
 `PHASE1_REPORT.md` for the full-suite run).
+
+## Fixed defect: the PSBT signing path never threaded fork_id (found during BitAI Payment implementation)
+
+While implementing BitAI Payment's live deposit test (see
+`docs/BITAI_PAYMENT_DESIGN.md` §8), a real BAIC_TEST transaction built via
+the standard `walletcreatefundedpsbt` → `walletprocesspsbt` →
+`finalizepsbt` sequence was consistently rejected at broadcast with
+`mempool-script-verify-flag-failed (Signature must be zero for failed
+CHECK(MULTI)SIG operation)`, even for a plain, freshly-verified P2WPKH
+input (confirmed via `gettxout`) — while a plain `sendtoaddress` from the
+same wallet, spending the same UTXO pool, broadcast successfully.
+
+Root cause: `SignPSBTInput` (`src/psbt.cpp`) built its
+`MutableTransactionSignatureCreator` without a `fork_id` argument,
+defaulting to 0 — every PSBT-signed input was signed against plain
+Bitcoin's sighash, never BitAIcoin's fork-ID-folded one. This gap existed
+only on the PSBT path: `CWallet::SignTransaction` (used by
+`sendtoaddress`) already resolved and threaded `fork_id` correctly, but
+nothing threaded it into `CWallet::FillPSBT` → `DescriptorScriptPubKeyMan::FillPSBT`
+→ `SignPSBTInput`. A second, related instance of the same class of bug was
+in `PSBTInputSignedAndVerified` (used both by `SignPSBTInput`'s own
+early-exit check and by `CWallet::FillPSBT`'s post-signing completeness
+computation): it built its `MutableTransactionSignatureChecker` without
+`fork_id` too, so even after the first bug was fixed, `walletprocesspsbt`
+still reported `complete: false` for a correctly-signed, broadcastable
+transaction, because it was re-verifying the signature against the wrong
+sighash.
+
+Fix: threaded an explicit `fork_id` parameter (default `0`, so every
+non-BitAIcoin chain and every caller that only assembles already-present
+signatures via a keyless dummy provider is unaffected) through
+`SignPSBTInput` and `PSBTInputSignedAndVerified`
+(`src/psbt.h`/`src/psbt.cpp`), through the `ScriptPubKeyMan`/`DescriptorScriptPubKeyMan`/
+`ExternalSignerScriptPubKeyMan::FillPSBT` chain, and resolved it in
+`CWallet::FillPSBT` via a new shared `CWallet::ResolveForkId()` helper
+(also now used by `CWallet::SignTransaction`, replacing its own inline
+copy of the same logic) and in `ProcessPSBT`
+(`descriptorprocesspsbt`'s RPC handler) from the active chain height.
+
+`CWallet::ResolveForkId()` exists specifically because the first draft of
+this fix called `GetLastBlockHeight()` directly in `FillPSBT`, which
+asserts if the wallet has never been attached to any chain
+(`m_last_block_processed_height == -1`) — true of `WalletTestingSetup`'s
+default fixture, and caught by `psbt_wallet_tests` failing after the
+change. `ResolveForkId()` checks `m_last_block_processed_height` directly
+and conservatively resolves to `fork_id=0` when it's unknown, rather than
+crashing.
+
+Regression test: `psbt_signing_and_verification_use_fork_id` in
+`src/test/bitaicoin_forkid_tests.cpp` signs a P2WPKH PSBT input with an
+explicit nonzero `fork_id` and asserts `PSBTInputSignedAndVerified`
+agrees only when given that same `fork_id`, disagreeing at `fork_id=0` —
+directly exercising the mismatch that let this hide (the two halves of
+the bug independently defaulting to 0 made them consistent with each
+other, just consistently wrong once a real broadcast checked the result
+against the correct, height-derived `fork_id`).
+
+`AnalyzePSBT` (`src/node/psbt.cpp`, backing the `analyzepsbt` RPC's
+diagnostic "what's missing" output) still calls `PSBTInputSignedAndVerified`
+without a `fork_id` — it has no chain-height context available in its
+current call signature. This is a known, narrow, diagnostic-only
+inaccuracy (it may report a correctly-signed post-activation input as
+not-yet-final) and does not affect signing, broadcast, or the completeness
+field `walletprocesspsbt` and `finalizepsbt` actually rely on.
 
 ## Known limitation
 

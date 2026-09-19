@@ -4,9 +4,11 @@
 
 #include <addresstype.h>
 #include <key.h>
+#include <psbt.h>
 #include <pubkey.h>
 #include <script/interpreter.h>
 #include <script/script.h>
+#include <script/signingprovider.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
@@ -136,6 +138,43 @@ BOOST_AUTO_TEST_CASE(forkid_collision_freedom)
             BOOST_CHECK(seen.insert(applied).second);
         }
     }
+}
+
+BOOST_AUTO_TEST_CASE(psbt_signing_and_verification_use_fork_id)
+{
+    // Regression test: SignPSBTInput/PSBTInputSignedAndVerified once
+    // defaulted fork_id to 0 at every call site regardless of what the
+    // caller was told to sign with, so a PSBT-signed transaction was
+    // produced against the wrong (plain-Bitcoin) sighash post-activation --
+    // sendtoaddress's direct-signing path (CWallet::SignTransaction) already
+    // threaded fork_id correctly, so this gap was PSBT-specific and only
+    // surfaced as a mempool rejection at broadcast time. See
+    // docs/BITAI_PAYMENT_DESIGN.md's implementation log for how this was
+    // found.
+    CKey key;
+    key.MakeNewKey(/*fCompressed=*/true);
+    CPubKey pubkey = key.GetPubKey();
+    CScript scriptPubKey = GetScriptForDestination(WitnessV0KeyHash(pubkey));
+
+    CMutableTransaction mtx = BuildSpendTx(CScript() << OP_TRUE);
+    PartiallySignedTransaction psbtx(mtx);
+    psbtx.inputs[0].witness_utxo = CTxOut(100000, scriptPubKey);
+
+    FlatSigningProvider provider;
+    provider.pubkeys[pubkey.GetID()] = pubkey;
+    provider.keys[pubkey.GetID()] = key;
+
+    const PrecomputedTransactionData txdata = PrecomputePSBTData(psbtx);
+
+    BOOST_REQUIRE(SignPSBTInput(provider, psbtx, 0, &txdata, std::nullopt, nullptr, /*finalize=*/true, BAI_FORK_ID) == PSBTError::OK);
+
+    // Verifying at the fork_id the input was actually signed with succeeds...
+    BOOST_CHECK(PSBTInputSignedAndVerified(psbtx, 0, &txdata, BAI_FORK_ID));
+    // ...but at fork_id=0 -- what every call site silently used before the
+    // fix -- it must not, because the signature covers a different sighash.
+    // If this ever returns true again, FillPSBT's completeness check and
+    // broadcast-time mempool validation have silently drifted apart again.
+    BOOST_CHECK(!PSBTInputSignedAndVerified(psbtx, 0, &txdata, /*fork_id=*/0));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

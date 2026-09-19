@@ -2169,15 +2169,18 @@ bool CWallet::SignTransaction(CMutableTransaction& tx) const
     return SignTransaction(tx, coins, SIGHASH_DEFAULT, input_errors);
 }
 
+uint32_t CWallet::ResolveForkId() const
+{
+    AssertLockHeld(cs_wallet);
+    if (m_last_block_processed_height < 0) return 0;
+    const Consensus::Params& consensusParams = Params().GetConsensus();
+    const int nHeight = m_last_block_processed_height + 1;
+    return (nHeight >= consensusParams.BitAIActivationHeight) ? consensusParams.BitAIForkId : 0;
+}
+
 bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors) const
 {
-    // BitAIcoin replay protection: resolve fork_id from the height the
-    // transaction would actually confirm at (current tip + 1), not the
-    // wallet's node identity -- every non-BitAIcoin chain leaves
-    // BitAIActivationHeight at INT_MAX so this is always 0 there.
-    const Consensus::Params& consensusParams = Params().GetConsensus();
-    const int nHeight = WITH_LOCK(cs_wallet, return GetLastBlockHeight()) + 1;
-    const uint32_t fork_id = (nHeight >= consensusParams.BitAIActivationHeight) ? consensusParams.BitAIForkId : 0;
+    const uint32_t fork_id = WITH_LOCK(cs_wallet, return ResolveForkId());
 
     // Try to sign with all ScriptPubKeyMans
     for (ScriptPubKeyMan* spk_man : GetAllScriptPubKeyMans()) {
@@ -2221,11 +2224,12 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
     }
 
     const PrecomputedTransactionData txdata = PrecomputePSBTData(psbtx);
+    const uint32_t fork_id = ResolveForkId();
 
     // Fill in information from ScriptPubKeyMans
     for (ScriptPubKeyMan* spk_man : GetAllScriptPubKeyMans()) {
         int n_signed_this_spkm = 0;
-        const auto error{spk_man->FillPSBT(psbtx, txdata, sighash_type, sign, bip32derivs, &n_signed_this_spkm, finalize)};
+        const auto error{spk_man->FillPSBT(psbtx, txdata, sighash_type, sign, bip32derivs, &n_signed_this_spkm, finalize, fork_id)};
         if (error) {
             return error;
         }
@@ -2240,7 +2244,7 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
     // Complete if every input is now signed
     complete = true;
     for (size_t i = 0; i < psbtx.inputs.size(); ++i) {
-        complete &= PSBTInputSignedAndVerified(psbtx, i, &txdata);
+        complete &= PSBTInputSignedAndVerified(psbtx, i, &txdata, fork_id);
     }
 
     return {};

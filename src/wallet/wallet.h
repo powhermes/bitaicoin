@@ -656,6 +656,19 @@ public:
 
     OutputType TransactionChangeType(const std::optional<OutputType>& change_type, const std::vector<CRecipient>& vecSend) const;
 
+    /**
+     * BitAIcoin replay protection: resolve fork_id from the height a
+     * transaction signed right now would actually confirm at (this
+     * wallet's own last-processed-block height + 1), not the node's
+     * identity -- every non-BitAIcoin chain leaves BitAIActivationHeight at
+     * INT_MAX so this is always 0 there. A wallet that has never been
+     * attached to any chain (m_last_block_processed_height == -1, e.g. a
+     * freshly created wallet in a unit test, or between CreateWallet and
+     * its first chain notification) has no way to know the height, so this
+     * conservatively resolves to 0 rather than asserting.
+     */
+    uint32_t ResolveForkId() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
     /** Fetch the inputs and sign with SIGHASH_ALL. */
     bool SignTransaction(CMutableTransaction& tx) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     /** Sign the tx given the input coins and sighash. */
