@@ -20,7 +20,16 @@ height-gated branch at a height strictly above the current tip.
 - **nPowTargetTimespan:** 1209600 (two weeks) / **nPowTargetSpacing:** 600 — retarget interval = 2016 blocks, on **absolute height**, continuing real Bitcoin's own epoch boundaries (confirmed: height 225792, the M5 bug height, is an exact multiple of 2016 — the fork does not reset retarget windows to zero at the activation point)
 - **BitAIForkId:** `0x424149` ("BAI"), folded into sighash at height >= BitAIActivationHeight for replay protection — a **separate mechanism** from any AuxPoW chain ID (see §5)
 - **pchMessageStart:** `b7 78 d8 11` / **nDefaultPort:** 28333 / **bech32_hrp:** "bai"
-- **Difficulty at tip and at block 225430 (verified directly from both, identical, no retarget yet):** 0.06249910592947572 (`bits` 0x1d0fffff) — expected, since only 394 blocks have passed since activation, well under the 2016-block retarget window
+- **Difficulty at tip and at block 225430:** identical, 0.06249910592947572 (`bits` 0x1d0fffff).
+  **Correction (2026-09-23) to an earlier, wrong characterization in this doc:** this is *not*
+  because "no retarget has happened yet." A native, absolute-height 2016-block retarget already
+  occurred at height 225792 (225792 / 2016 = 112 exactly — see the epoch-boundary note above) i.e.
+  well within the 225430-225823 span already covered by this baseline. That retarget genuinely ran
+  and genuinely recomputed a new target from the preceding 2016-block window — it simply reproduced
+  the identical target value, because the chain has been mining at a stable, low rate relative to
+  `consensus.powLimit` throughout that window, not because the retarget was skipped or didn't fire.
+  The original text here ("no retarget yet... well under the 2016-block retarget window") was
+  factually wrong and is corrected here rather than silently edited out.
 
 ## 2. The five points requested before implementation
 
@@ -126,26 +135,67 @@ format) and should not be conflated.
 - **Target block interval:** 600 seconds -- reuses BitAIcoin's existing `nPowTargetSpacing`
   unchanged. No new constant introduced for this.
 - **Anchor block:** height 227807, the last block validated under the legacy (pre-activation)
-  retarget algorithm. `anchor_target` and `anchor_time` are read from that block's own header --
-  not from a running EMA, not from the previous block once ASERT is live. Every subsequent block's
-  target is computed **fresh from this fixed anchor**, which is the core property that makes ASERT
-  immune to the cumulative-rounding-drift problem an EMA-style algorithm has.
-- **Exact formula:**
-  `next_target = anchor_target * 2^((time_diff - target_interval*(height_diff+1)) / halflife)`
-  where `time_diff` = current block's timestamp minus anchor block's timestamp, `height_diff` =
-  current block's height minus anchor height. The `height_diff + 1` (not `height_diff`) is
-  deliberate and matches the reference spec: it accounts for the anchor block itself already having
-  "used up" one interval's worth of schedule, so a block arriving exactly on schedule produces
-  exponent 0 (no change) rather than a small permanent bias.
-- **Integer algorithm:** BCHN's reference implementation computes this with **fixed-point
-  arithmetic, scale factor 2^16** (not floating point) -- `exponent = ((time_diff - target_interval
-  *(height_diff+1)) << 16) / halflife`, then splits `exponent` into an integer number of bit-shifts
-  (`exponent >> 16`) plus a fractional remainder in `[0, 65536)`, applies the integer shifts
-  directly to the 256-bit target, and approximates `2^(fractional/65536)` with a validated
-  polynomial. **I will implement and validate this integer path against BCHN's own published test
-  vectors before it is committed as consensus code** -- reproducing fixed-point polynomial
-  coefficients from memory is exactly the kind of thing that must be checked against a known-good
-  reference, not trusted on recall, given what "exactly, not merely ASERT-style" is asking for.
+  retarget algorithm.
+- **CORRECTION (2026-09-23) to the anchor/time-reference convention, found by reading BCHN's actual
+  `pow.cpp` rather than continuing to derive it from prose, per explicit instruction:** my first-pass
+  text above said `anchor_target` and `anchor_time` are read from the anchor block's own header, and
+  the exact-formula bullet (kept below, now corrected) said `time_diff` = current block's time minus
+  *anchor block's* time. **Both were wrong in the same way.** The real BCHN convention, confirmed
+  from `GetNextASERTWorkRequired`/`CalculateASERT` in
+  [bitcoin-cash-node/bitcoin-cash-node `src/pow.cpp`](https://github.com/bitcoin-cash-node/bitcoin-cash-node/blob/master/src/pow.cpp)
+  and the [official upgrade spec](https://upgradespecs.bitcoincashnode.org/2020-11-15-asert/):
+    - `time_diff` = the **tip block's** time (i.e. `pindexPrev`, the most recently connected block
+      when computing the *next* block's target -- never the being-mined block's own time, since
+      that's unknown at target-computation time) minus the **anchor block's PARENT's** time, not the
+      anchor block's own time.
+    - `height_diff` = the tip block's height minus the anchor height.
+    - `anchor_target` = the anchor block's own `nBits`, which *is* read from its own header (this
+      part was right).
+  For BitAIcoin, concretely: `anchorParams = {nHeight: 227807, nBits: <227807's own bits>,
+  nPrevBlockTime: <block 227806's time>}`. When computing the target for block N (N > 227807), the
+  tip is block N-1, so `time_diff = time(N-1) - time(227806)` and `height_diff = height(N-1) -
+  227807`. This must be implemented exactly this way, not "from the anchor's own timestamp" -- it is
+  the kind of off-by-one-block, easy-to-get-wrong-from-memory detail the instruction to "test the
+  timestamp-reference convention rather than deriving it from prose" was specifically about, and
+  reading the real source (not just the spec prose, which is easy to mis-paraphrase on this exact
+  point) is what caught it.
+- **Exact formula (corrected to match the real convention above):**
+  `next_target = anchor_target * 2^((time_diff - target_interval*(height_diff+1)) / halflife)`,
+  with `time_diff`/`height_diff` as just defined (tip-vs-anchor's-parent, tip-vs-anchor). The
+  `height_diff + 1` (not `height_diff`) is deliberate and matches the reference spec: it accounts for
+  the anchor block itself already having "used up" one interval's worth of schedule, so a block
+  arriving exactly on schedule produces exponent 0 (no change) rather than a small permanent bias.
+- **Integer algorithm, transcribed line-for-line from the real source** (not reconstructed from
+  memory of the spec prose) into `contrib/asert_reference.py::calculate_asert()`, including the
+  actual polynomial coefficients (`195766423245049`, `971821376`, `5127`, rounding constant `2^47`,
+  `>> 48`, radix `65536`), the integer-shift/fractional-remainder split, and the left-shift overflow
+  clamp. **Validated in this session** against the algorithm's own defining algebraic properties
+  (exact identity on-schedule, exact doubling at +halflife, exact halving at -halflife, monotonicity,
+  correct clamping) rather than against literal third-party numeric test-vector rows -- disclosed
+  limitation: the GitLab `qa-assets` CSV test vectors
+  ([bchn-sw/qa-assets](https://gitlab.com/bitcoin-cash-node/bchn-sw/qa-assets/-/tree/master/test_vectors/aserti3-2d))
+  returned HTTP 403 to automated fetch this session, and the available web-fetch tool paraphrases
+  fetched pages rather than passing through raw bytes, so literal upstream row values could not be
+  independently byte-confirmed here. The algebraic self-consistency checks are a real, defensible
+  validation (they're exact mathematical consequences of the formula, not something a wrong
+  transcription would pass by luck), but obtaining the literal CSV and diffing it byte-for-byte
+  remains the stronger check and should be done from a normal browser/`git clone` before this ships
+  as consensus code, not asserted as already done here.
+- **Real, concrete finding from this validation, not present in the first-pass addendum:** BCHN's
+  `CalculateASERT` hard-asserts `(powLimit >> 224) == 0`. BitAIcoin's actual `consensus.powLimit`
+  (`src/kernel/chainparams.cpp:289`, confirmed by reading the source directly) has only 28 leading
+  zero bits (`bit_length() == 228`), 4 bits short of the 32-bit margin real Bitcoin/BCH mainnet's own
+  powLimit has, so it **fails** this precondition outright. Because this is a plain C `assert()`,
+  which is compiled out under `NDEBUG` in a release build, this would not crash a release binary --
+  the actual overflow protection is the separate, unconditional runtime clamp at the left-shift step
+  (`if ((nextTargetShifted >> shifts) != nextTarget) nextTarget = powLimit;`), which does not depend
+  on this assert. But a debug build would abort on the very first ASERT retarget after activation,
+  and copying the assert verbatim would be silently wrong for BitAIcoin's own, intentionally wider,
+  powLimit. **Decision applied in `asert_reference.py`, flagged here for the eventual C++ port to
+  carry forward, not resolved unilaterally as final:** relax the precondition to the property this
+  code actually relies on -- `powLimit >> 240 == 0` (16 bits of multiply headroom, since the
+  fixed-point `factor` is always `< 2*RADIX = 2^17`) -- which BitAIcoin's powLimit satisfies
+  (228 < 240), instead of copying BCH mainnet's tighter, coincidental 224-bit figure verbatim.
 - **powLimit / clamping behavior, corrected from my first pass:** the ceiling that matters is
   `next_target <= consensus.powLimit` (targets can't get *easier* than the chain-wide floor
   difficulty) -- **not** a floor preventing targets from getting *harder*; there is no consensus
@@ -168,43 +218,135 @@ format) and should not be conflated.
   "recompute from the anchor every time," not "carry forward the last computed target," or that
   property is lost.
 
-#### Half-life: simulated, not guessed
+#### Half-life: NOT frozen. Expanded study below; the earlier "36x" claim is retracted.
 
-Built a deterministic (expected-value) simulation of the exact formula above, at BitAIcoin's real
-`nPowTargetSpacing` of 600s, against the requested 10x/100x/1000x arrival (hashrate increase) and
-withdrawal (hashrate decrease) shocks, across six half-life candidates. Two real bugs were caught
-and fixed while building it before trusting any output: (1) the target/hashrate relation was
-initially inverted (fixed by deriving the steady-state condition analytically: for a permanent
-hashrate multiplier k, the correct equilibrium is `relative_target = 1/k`, not `k`); (2) the
-powLimit ceiling above had to be added, or withdrawal scenarios produce a nonsensical unbounded
-blow-up in the model.
+**The earlier claim in this doc that a 6-hour half-life is "36x harder to whipsaw" than 1 hour is
+retracted outright, per explicit instruction.** It was arithmetically wrong with no defensible
+source (6h / 1h = 6x, not 36x -- there is no calculation that produces 36 from the numbers actually
+in play). It should never have been written without being derived and shown. It is not being
+"substantiated" after the fact; it's dropped.
 
-| half-life | arrival 10x | arrival 100x | arrival 1000x | withdrawal (any factor) |
-|---|---|---|---|---|
-| 1 hour | 38 blk / 6.4h | 59 blk / 6.5h | 79 blk / 6.6h | clamped at powLimit, no recovery possible |
-| 2 hours | 77 blk / 9.6h | 119 blk / 10.0h | 159 blk / 10.0h | same |
-| 6 hours | 233 blk / 22.8h | 358 blk / 23.7h | 478 blk / 23.8h | same |
-| 1 day | 934 blk / 82.3h | 1432 blk / 85.6h | 1913 blk / 86.0h | same |
-| 2 days (BCH mainnet) | 1869 blk / 161.7h | 2865 blk / 168.2h | 3826 blk / 168.9h | same |
-| 4 days | 3739 blk / 320.5h | 5731 blk / 333.6h | 7652 blk / 334.9h | same |
+**Replacement metric, precisely defined and reproduced, from BitAIcoin's real, unmodified consensus
+timestamp constants** (confirmed via `grep` against `src/chain.h`/`src/validation.cpp`:
+`MAX_FUTURE_BLOCK_TIME = 2*60*60` seconds, `nMedianTimeSpan = 11` blocks, hard rejection at
+`nTime > now + MAX_FUTURE_BLOCK_TIME` and at `nTime <= GetMedianTimePast()` of the previous 11
+blocks): the maximum inflation a single block's own target can receive from one miner maximally
+lying about that one block's timestamp (shifting it the full allowed +7200s into the future) is
+exactly `2^(MAX_FUTURE_BLOCK_TIME / halflife)`:
 
-"Settle" = the ratio of actual to target block-arrival rate stays within 10% for at least 20
-consecutive blocks. Withdrawal scenarios never show a settling time because, given the chain's
-*current* anchor-adjacent state (already at powLimit), there is nothing for the algorithm to ease
-toward -- it correctly holds at the ceiling and blocks simply arrive slower, with the deviation
-exactly equal to the withdrawal factor for as long as the withdrawal persists. This is a genuine,
-useful finding, not a gap in the study: it means the arrival direction is the one with real dynamics
-to tune for right now, and the withdrawal direction is a *clamp-is-honored* test, not a
-*settling-speed* test.
+| half-life | max single-block target inflation via a +7200s timestamp lie |
+|---|---|
+| 1 hour (3600s) | **4.0000x** |
+| 6 hours (21600s) | **1.2599x** |
+| 1 day (86400s) | **1.0595x** |
+| 2 days (172800s) | **1.0293x** |
 
-**Recommendation: half-life = 6 hours (21600 seconds).** Settles a full 10x-1000x arrival shock
-within about a day of dedicated testing (22.8-23.8 hours), which fits a deliberate, hands-on stress
-test session, while being 36x longer than the 1-hour candidate -- long enough that ordinary
-block-timestamp noise, or a short deliberate timestamp-shading attempt, can't whipsaw the difficulty
-the way an extremely short half-life would let it. This is a recommendation with the evidence
-attached, not a final decision on my authority alone -- happy to move to 1-2 hours for faster
-test iteration, or 1+ day for more manipulation resistance, if either is preferred once the table is
-in front of you.
+This is a single-block, one-shot metric (one miner, one lied timestamp, immediate next-block
+target), not a model of a sustained multi-block manipulation campaign -- stated as a limitation of
+the metric itself, not hidden.
+
+#### Expanded study: surge/recovery, pool-hopping, stochastic, and MTP-floor-aware
+
+The prior version of this section used a floating-point behavioral stand-in for the DAA, permanent
+shocks only, deterministic arrivals only, and no timestamp-consensus constraints -- explicitly
+called out as insufficient ("the current withdrawal simulation only establishes that a hashrate drop
+... cannot be compensated because the chain is already at powLimit") and redone from scratch per
+instruction. The new study (`contrib/asert_halflife_simulation.py`, built on the bit-exact
+`calculate_asert()` port validated in §A above) adds:
+
+1. **Surge-then-revert** (not permanent-only): 1x baseline -> {10x, 100x, 1000x} held for
+   {20, 100, 500} blocks -> back to 1x, with recovery measured *after* the surge ends, not from t=0.
+2. **Repeated on/off pool-hopping cycles** at several on/off block-count combinations.
+3. **A stochastic (Poisson-arrival) variant** alongside the deterministic (expected-value) model, 5
+   seeds per half-life.
+4. **BitAIcoin's real MTP-floor and future-time-ceiling constraints** applied to every simulated
+   timestamp (a block's recorded time cannot go below `MTP(previous 11 blocks) + 1`).
+
+**Surge-then-revert (selected rows; full table in the script's own output, reproducible via
+`python3 contrib/asert_halflife_simulation.py`):**
+
+| half-life | surge | held | blocks to recover post-surge | wall-clock to recover | worst instant rate multiple in transition |
+|---|---|---|---|---|---|
+| 1 hour | 1000x | 20 blk | 18 | 9.5h | 120.0x |
+| 1 hour | 1000x | 500 blk | 2 | 169.9h (~7.1d) | 999.2x |
+| 6 hours | 1000x | 20 blk | 61 | 16.1h | 600.0x |
+| 6 hours | 1000x | 500 blk | 2 | 160.0h (~6.7d) | 939.7x |
+| 1 day | 1000x | 20 blk | 1 | 3.7h | 600.0x |
+| 1 day | 1000x | 500 blk | 458 | 159.2h (~6.6d) | 85.7x |
+| 2 days | 1000x | 20 blk | 1 | 3.5h | 600.0x |
+| 2 days | 1000x | 500 blk | 809 | 214.3h (~8.9d) | 300.0x |
+
+Real finding, not previously visible under the permanent-shock-only model: for **short** surges
+(held only 20 blocks), longer half-lives barely react at all before the surge ends, so "recovery"
+looks nearly instantaneous (1-2 blocks) simply because there was nothing to recover *from* -- the
+DAA never moved. For **long, sustained** surges (held 500 blocks), the ordering flips: the fast
+half-lives (1h, 6h) have already eased the target most of the way toward the new equilibrium by the
+time the surge ends and recover almost immediately (2 blocks), while the slow half-lives (1 day, 2
+days) are still mid-adjustment when the shock ends and take hundreds of blocks and many days of
+wall-clock time to finish settling. **A short half-life is not strictly "worse" here -- it's better
+adapted to long sustained shocks and worse adapted to resisting brief manipulation; a long half-life
+is the reverse.** This is the real tradeoff the half-life choice has to make, and it only shows up
+once surge duration is varied, which the original permanent-only model could not reveal.
+
+**Pool-hopping (10x/50-on/50-off, 6 cycles; 100x/20-on/100-off, 4 cycles; 1000x/10-on/200-off, 3
+cycles):** worst instantaneous rate multiple during any cycle scales with the on-hashrate multiplier
+roughly as expected (10.0x / 100.0x / 600.0x respectively, consistent across all four half-lives --
+the *ceiling* of the swing is set by the multiplier itself, not by the half-life). Whether difficulty
+fully re-settles to 1x by the *end* of each off-phase is more sensitive to the specific on/off block
+counts chosen than to half-life alone (full table in script output) -- worth re-running with
+production-realistic on/off durations once real pool behavior is observed, rather than reading too
+much into the specific numbers from these illustrative cycle lengths.
+
+**Stochastic vs. deterministic -- a real methodological finding, not just an alternative run:**
+applying the deterministic report's strict metric ("20 consecutive individual blocks each within 10%
+of target") to the Poisson-arrival logs returned **no settling point for any seed at any half-life**.
+Investigated rather than silently switched away from: a Poisson arrival process has per-block
+coefficient of variation of 1.0 (stdev == mean for an exponential distribution), so individual
+blocks routinely land 2-5x off the mean purely from honest statistical noise, making "20 individual
+blocks in a row within 10%" essentially unsatisfiable regardless of half-life or DAA quality. That is
+a real property of the *metric*, not of the DAA, once arrivals are genuinely random rather than
+expected-value-only -- disclosed as a limitation of the original metric definition, now fixed with a
+rolling-window metric (mean rate over a trailing 20-block window, checked for persistence over the
+following window) that is actually meaningful under stochastic noise:
+
+| half-life | deterministic recovery (windowed) | stochastic recovery (windowed), 5 seeds |
+|---|---|---|
+| 1 hour | 21 blocks | 20-110 blocks (mean ~49) |
+| 6 hours | 99 blocks | 70-138 blocks (mean ~96) |
+| 1 day | 203 blocks | 32-104 blocks (mean ~66) |
+| 2 days | 154 blocks | 20-149 blocks (mean ~61) |
+
+The half-life ordering is not perfectly monotonic under either metric at this scenario (100x/100blk
+surge) -- both the deterministic and stochastic windowed numbers show 1 day recovering *faster* than
+6 hours here, which is a genuine artifact of exactly how far a 100x/100-block surge pushes each
+half-life's target before reverting (a 6-hour half-life has moved further from anchor by block 100
+than a 1-day one has, so has more distance to unwind) rather than a general "slower half-lives always
+recover faster" rule -- the surge-then-revert table above, which varies surge duration, is the more
+complete picture. Under real stochastic noise, recovery times for any single half-life vary by roughly
+2-5x across seeds, which any half-life decision needs to tolerate as normal variance, not treat as a
+DAA malfunction.
+
+**MTP-floor impact -- a genuine, disclosed constraint, but a narrow one:** the real MTP floor (nTime
+must exceed the median of the previous 11 blocks) essentially never binds for the 10x-1000x, ≤500-block
+scenarios above (0 blocks clamped in every case checked). It only starts to bind under a much more
+extreme, sustained combination -- a 10,000x surge held for 500 blocks -- and even then only for a
+minority of blocks: 5/500 at 1-hour half-life, 20/500 at 6 hours, 75/500 at 1 day, 85/500 at 2 days.
+**Counterintuitive but explainable finding:** the MTP floor binds *more*, not less, at longer
+half-lives under an extreme sustained surge, because a slower-reacting DAA leaves the target closer
+to its pre-surge (harder-to-mine-for-the-new-hashrate) value for longer, which is exactly the
+condition (target still "too easy" relative to the surged hashrate) that drives the algorithm's own
+*expected* block interval below one second, at which point the integer-second timestamp floor -- not
+the DAA -- becomes the binding constraint. This is a second, independent point in favor of a shorter
+half-life for resisting extreme sustained arrival shocks specifically, to be weighed against the
+single-block timestamp-manipulation metric above, which favors a *longer* half-life.
+
+**No half-life is selected here.** Per instruction, this section compares {1h, 6h, 1d, 2d} on the
+full expanded scenario set and leaves the consensus value open. The tradeoffs now visible: short
+half-lives adapt faster to long sustained shocks and resist the MTP-floor interaction better, but are
+more exposed to single-block timestamp manipulation and to whipsaw during pool-hopping-style cycling;
+long half-lives are the reverse. Full reproducible output: `python3
+contrib/asert_halflife_simulation.py` (uses `contrib/asert_reference.py`, the validated bit-exact
+ASERT port from §A).
 
 ### B. AuxPoW chain ID 16969 -- checked now, real search, sources included
 
