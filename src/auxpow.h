@@ -198,6 +198,17 @@ public:
 };
 
 /**
+ * Matches this codebase's own `CTransactionRef` convention
+ * (`std::shared_ptr<const CTransaction>`, primitives/transaction.h) exactly:
+ * a shared, immutable-after-construction handle. `CBlockHeader::auxpow` is
+ * declared using the raw type directly (not this alias) since block.h only
+ * forward-declares `CAuxPow` and cannot see this alias; this is the
+ * convenience name for use everywhere else (tests, and any future code that
+ * builds a proof to attach to a header).
+ */
+using CAuxPowRef = std::shared_ptr<const CAuxPow>;
+
+/**
  * Height-gated activation and pre/post-activation version-rule enforcement,
  * kept deliberately STANDALONE from CBlockHeader for now rather than spliced
  * into ContextualCheckBlockHeader() in this slice.
@@ -316,5 +327,98 @@ void UnserializeBlockHeaderWithAuxPow(CBlockHeader& header, Stream& s)
         header.auxpow.reset();
     }
 }
+
+/**
+ * Full, auxpow-aware CBlock (de)serialization: header (6 fields) + optional
+ * auxpow proof + the block's own transactions, in that order.
+ *
+ * DELIBERATELY NOT implemented by changing `CBlock::SERIALIZE_METHODS`
+ * itself (in primitives/block.h): that would require block.h to see this
+ * file's declarations (or vice versa), and the two files already can't
+ * include each other (block.h forward-declares CAuxPow specifically to
+ * avoid that cycle -- see the comment there). Exactly as with
+ * SerializeBlockHeaderWithAuxPow above, this is a SEPARATE, explicit
+ * function pair rather than baked into the generic type's own Serialize --
+ * consistent with, not a workaround for, this whole slice's established
+ * pattern. `CBlock::SERIALIZE_METHODS` itself is UNCHANGED (still
+ * `AsBase<CBlockHeader>(obj), obj.vtx`, i.e. base-header-only, exactly as
+ * before this slice) -- so it, and therefore every existing caller of plain
+ * `<<`/`>>` on a `CBlock` (which never expected an auxpow field to exist
+ * before this slice), continues to serialize non-AuxPoW blocks
+ * byte-for-byte identically. Only code that explicitly calls these new
+ * functions gets the auxpow-aware behavior.
+ *
+ * `with_witness` controls the block's own transactions' witness inclusion
+ * (default true, the modern/common case) -- NOT the same thing as the
+ * `TX_NO_WITNESS` used unconditionally for the auxpow proof's internal
+ * coinbase above, which is a completely different, unrelated transaction
+ * with its own, separate, permanent requirement (see the SERIALIZE_METHODS
+ * comment on CAuxPow). Real net_processing relay needs both variants for a
+ * block's own transactions (legacy no-witness relay to pre-SegWit peers vs.
+ * modern with-witness relay) -- exposed as a parameter here, mirroring
+ * net_processing.cpp's own real `TX_NO_WITNESS(*pblock)` /
+ * `TX_WITH_WITNESS(*pblock)` call sites, rather than silently hardcoding
+ * one and losing the other for AuxPoW blocks specifically.
+ */
+template <typename Stream>
+void SerializeBlockWithAuxPow(const CBlock& block, Stream& s, bool with_witness = true)
+{
+    SerializeBlockHeaderWithAuxPow(block, s); // CBlock IS-A CBlockHeader
+    if (with_witness) {
+        s << TX_WITH_WITNESS(block.vtx);
+    } else {
+        s << TX_NO_WITNESS(block.vtx);
+    }
+}
+
+template <typename Stream>
+void UnserializeBlockWithAuxPow(CBlock& block, Stream& s, bool with_witness = true)
+{
+    UnserializeBlockHeaderWithAuxPow(block, s);
+    if (with_witness) {
+        s >> TX_WITH_WITNESS(block.vtx);
+    } else {
+        s >> TX_NO_WITNESS(block.vtx);
+    }
+}
+
+/**
+ * Formatter for use with `Using<>()` at call sites that currently write
+ * `TX_WITH_WITNESS(block)` / `TX_NO_WITNESS(block)` directly on a `CBlock`
+ * (P2P BLOCK message send/receive, disk read/write) -- swaps in the
+ * auxpow-aware functions above as a drop-in replacement. Two separate
+ * formatter types (not a single parameterized one) because `Using<F>()`
+ * takes a type, not a runtime value, matching how `TX_WITH_WITNESS`/
+ * `TX_NO_WITNESS` are themselves two separate constants for the same reason.
+ */
+struct AuxPowBlockFormatterWithWitness {
+    template <typename Stream>
+    static void Ser(Stream& s, const CBlock& block) { SerializeBlockWithAuxPow(block, s, /*with_witness=*/true); }
+    template <typename Stream>
+    static void Unser(Stream& s, CBlock& block) { UnserializeBlockWithAuxPow(block, s, /*with_witness=*/true); }
+};
+struct AuxPowBlockFormatterNoWitness {
+    template <typename Stream>
+    static void Ser(Stream& s, const CBlock& block) { SerializeBlockWithAuxPow(block, s, /*with_witness=*/false); }
+    template <typename Stream>
+    static void Unser(Stream& s, CBlock& block) { UnserializeBlockWithAuxPow(block, s, /*with_witness=*/false); }
+};
+
+/** Convenience wrappers, mirroring TX_WITH_WITNESS(x)/TX_NO_WITNESS(x)'s own call shape. */
+template <typename T> auto AuxPowBlockWithWitness(T&& t) { return Using<AuxPowBlockFormatterWithWitness>(std::forward<T>(t)); }
+template <typename T> auto AuxPowBlockNoWitness(T&& t) { return Using<AuxPowBlockFormatterNoWitness>(std::forward<T>(t)); }
+
+/**
+ * Formatter for use with `Using<>()` at call sites that serialize a plain
+ * `CBlockHeader` field directly and need it to be auxpow-aware -- e.g.
+ * `CBlockHeaderAndShortTxIDs::header` (BIP152 compact blocks,
+ * src/blockencodings.h).
+ */
+struct AuxPowHeaderFormatter {
+    template <typename Stream>
+    static void Ser(Stream& s, const CBlockHeader& header) { SerializeBlockHeaderWithAuxPow(header, s); }
+    template <typename Stream>
+    static void Unser(Stream& s, CBlockHeader& header) { UnserializeBlockHeaderWithAuxPow(header, s); }
+};
 
 #endif // BITCOIN_AUXPOW_H

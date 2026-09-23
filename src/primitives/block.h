@@ -93,7 +93,38 @@ public:
     // codebase already splits CTransaction's txid-vs-wtxid concerns into
     // SerializeTransaction/UnserializeTransaction free functions rather than
     // one generic conditional Serialize.
-    std::shared_ptr<CAuxPow> auxpow;
+    //
+    // OWNERSHIP/VALUE SEMANTICS, decided explicitly (2026-09-23), not left
+    // implicit: this is `shared_ptr<const CAuxPow>` -- immutable once
+    // attached -- not `shared_ptr<CAuxPow>` and not a deep-copied value
+    // member. A plain mutable `shared_ptr<CAuxPow>` would mean an ordinary
+    // CBlockHeader copy (which happens all over this codebase, e.g.
+    // `CBlock(const CBlockHeader&)`'s `*this = header` a few lines below)
+    // ALIASES the same proof object as the original; mutating the proof
+    // through one copy would then silently change what the other copy
+    // reports too, which is exactly the kind of surprising aliasing a
+    // consensus primitive that otherwise has plain value semantics must not
+    // have. `const`-qualifying the pointee closes this off at the type
+    // level -- there is no way to obtain a non-const `CAuxPow&` through this
+    // member at all, so "mutate one copy's proof" is not merely undone by
+    // convention, it does not compile. This exactly mirrors
+    // `CTransactionRef` (`std::shared_ptr<const CTransaction>`,
+    // primitives/transaction.h), this codebase's own established pattern
+    // for shared, immutable-after-construction consensus payloads -- not a
+    // new convention invented for this member. Deep-copy-on-header-copy was
+    // considered and rejected: it would still allow in-place mutation of
+    // the (now-distinct) copy's proof, a smaller but still real footgun,
+    // and would add a real per-copy cost (coinbase tx + two merkle
+    // branches + a full parent header) that cheap CBlockHeader copies
+    // should not silently acquire. A future proof is attached by
+    // constructing a brand-new `CAuxPow` value and a brand-new shared_ptr
+    // (see `src/test/auxpow_tests.cpp`'s
+    // `auxpow_ownership_is_shared_and_immutable` test), never by mutating
+    // an already-attached one in place -- verified there is no call site
+    // anywhere in this codebase (as of this pass) that needs to do the
+    // latter (mining/GBT support, the one plausible future need, does not
+    // exist yet).
+    std::shared_ptr<const CAuxPow> auxpow;
     // --- end BitAIcoin AuxPoW addition ---
 
     CBlockHeader()

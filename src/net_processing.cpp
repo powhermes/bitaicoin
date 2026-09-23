@@ -41,6 +41,7 @@
 #include <policy/feerate.h>
 #include <policy/fees/block_policy_estimator.h>
 #include <policy/packages.h>
+#include <auxpow.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -2434,9 +2435,13 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
     }
     if (pblock) {
         if (inv.IsMsgBlk()) {
-            MakeAndPushMessage(pfrom, NetMsgType::BLOCK, TX_NO_WITNESS(*pblock));
+            // AuxPoW addition: AuxPowBlockNoWitness carries any attached auxpow
+            // proof through exactly like TX_NO_WITNESS did for witness data --
+            // see src/auxpow.h. Byte-for-byte identical to the old
+            // TX_NO_WITNESS(*pblock) for any block with no auxpow attached.
+            MakeAndPushMessage(pfrom, NetMsgType::BLOCK, AuxPowBlockNoWitness(*pblock));
         } else if (inv.IsMsgWitnessBlk()) {
-            MakeAndPushMessage(pfrom, NetMsgType::BLOCK, TX_WITH_WITNESS(*pblock));
+            MakeAndPushMessage(pfrom, NetMsgType::BLOCK, AuxPowBlockWithWitness(*pblock));
         } else if (inv.IsMsgFilteredBlk()) {
             bool sendMerkleBlock = false;
             CMerkleBlock merkleBlock;
@@ -2473,7 +2478,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
                     MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, cmpctblock);
                 }
             } else {
-                MakeAndPushMessage(pfrom, NetMsgType::BLOCK, TX_WITH_WITNESS(*pblock));
+                MakeAndPushMessage(pfrom, NetMsgType::BLOCK, AuxPowBlockWithWitness(*pblock));
             }
         }
     }
@@ -4863,7 +4868,10 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
 
         std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
-        vRecv >> TX_WITH_WITNESS(*pblock);
+        // AuxPoW addition: AuxPowBlockWithWitness parses any attached auxpow
+        // proof (based on the header's own version bit) in addition to
+        // everything TX_WITH_WITNESS already handled -- see src/auxpow.h.
+        vRecv >> AuxPowBlockWithWitness(*pblock);
 
         LogDebug(BCLog::NET, "received block %s peer=%d\n", pblock->GetHash().ToString(), pfrom.GetId());
 

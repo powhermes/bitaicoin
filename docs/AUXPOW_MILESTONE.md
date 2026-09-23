@@ -244,12 +244,112 @@ confirming the modified `CBlockHeader` works correctly in an actual running node
 tests. The real, separately-running live BitAIcoin node (synced to height 225823) was left completely
 untouched throughout -- no new binary was ever pointed at its datadir.
 
-**Explicitly still NOT done, next slices:** splicing `CheckAuxPowRules()` into the
-real `ContextualCheckBlockHeader()` call path (mechanical now that storage exists, but touches a
-function with many existing call sites and deserves its own review, per instruction to keep this
-separate); `CheckProofOfWorkImpl` and net_processing header/block relay (announcing/downloading an
-AuxPoW-carrying header over the wire, and `CBlock`'s own serialization, which still only carries the
-base header via `AsBase<CBlockHeader>` and was not touched this slice). The DAA branch (ASERT,
+**Status update (2026-09-23, ownership + CBlock + P2P/disk slice): DONE for the tractable, highest-
+value parts; two real gaps found and explicitly deferred with a precise audit, not silently skipped.**
+Per explicit instruction, this landed BEFORE splicing `CheckAuxPowRules()` into the live acceptance
+path, since a real AuxPoW block first needs to be able to reach validation intact at all.
+
+**1. `CBlockHeader::auxpow` ownership/value semantics -- resolved, documented, regression-tested.**
+Changed to `std::shared_ptr<const CAuxPow>` (from a plain mutable `shared_ptr<CAuxPow>`), matching
+this codebase's own `CTransactionRef` (`shared_ptr<const CTransaction>`) precedent exactly -- not a
+new convention. This closes off, at the type level, the exact hazard flagged: an ordinary
+`CBlockHeader` copy (which happens throughout this codebase) shares the same proof object as the
+original, but since the pointee is now immutable, there is no way to mutate one copy's proof and
+have it silently show up in another -- the language does not permit obtaining a non-`const CAuxPow&`
+through this member at all. A deep-copy-on-header-copy alternative was considered and rejected: it
+would still allow in-place mutation of the (now-distinct) copy's proof, a smaller but real footgun,
+and would add a real per-copy cost (coinbase tx + two merkle branches + a full parent header) to
+otherwise-cheap header copies. A compile-time regression test
+(`static_assert(std::is_same_v<decltype(*std::declval<CBlockHeader>().auxpow), const CAuxPow&>, ...)`
+in `src/test/auxpow_tests.cpp`) fails to compile if this is ever changed back, plus a runtime test
+(`auxpow_ownership_is_shared_and_immutable`) demonstrating the shared-copy behavior and the correct
+way to attach a genuinely different proof (build a new `CAuxPow` value and a new `shared_ptr`, never
+mutate in place).
+
+**2. Full `CBlock` (header + auxpow + real transactions) serialization -- resolved, tested.**
+`CBlock::SERIALIZE_METHODS` itself is intentionally UNCHANGED (still `AsBase<CBlockHeader>(obj),
+obj.vtx` -- base-header-only, byte-for-byte identical to before this slice for every non-AuxPoW
+block) because block.h and auxpow.h still cannot include each other (the same circular-include
+constraint as CBlockHeader itself). Instead, added `SerializeBlockWithAuxPow`/
+`UnserializeBlockWithAuxPow` (`src/auxpow.h`) as the real, separate, explicit auxpow-aware path for
+`CBlock`, plus `AuxPowBlockFormatterWithWitness`/`AuxPowBlockFormatterNoWitness` (used via
+`Using<>()`, exactly this codebase's own idiom for swapping in alternate serialization logic at a
+call site) so real call sites could adopt it as a near-drop-in replacement for `TX_WITH_WITNESS(...)`/
+`TX_NO_WITNESS(...)`. 6 new tests cover: byte-for-byte identical output vs. the plain generic
+serializer for non-AuxPoW blocks; the proof appearing exactly once in the serialized bytes (not
+duplicated, not coincidentally matched inside `vtx`); full round trips with two REAL transactions
+(verified by re-deriving `BlockMerkleRoot` from the round-tripped `vtx` and confirming it still
+matches); `GetHash()` invariance under attaching/removing the proof at the full-`CBlock` level, not
+just the header level; and a truncated/malformed-auxpow stream failing cleanly (`std::ios_base::
+failure`) rather than misparsing.
+
+**3. P2P/disk/compact-block audit and wiring -- real call sites fixed, real call sites explicitly
+deferred, cited precisely rather than assumed.** Audited (grep + full-context reading, not just
+grep hits) every place a `CBlockHeader`/`CBlock` is (de)serialized in `net_processing.cpp`,
+`node/blockstorage.cpp`, and `src/blockencodings.h`/`.cpp`:
+  - **Fixed: BLOCK message send (3 call sites) and receive (1 call site), `net_processing.cpp`.**
+    `TX_NO_WITNESS(*pblock)`/`TX_WITH_WITNESS(*pblock)` replaced with
+    `AuxPowBlockNoWitness(*pblock)`/`AuxPowBlockWithWitness(*pblock)` at every real send site
+    (lines identified via `grep -n "NetMsgType::BLOCK"`, each read in full surrounding context
+    before editing) and the one real receive site. Byte-for-byte identical to before for any block
+    with no auxpow attached.
+  - **Fixed: disk read/write (4 call sites), `node/blockstorage.cpp`.** `AddBlockFileInfo`'s size
+    accounting, `ReadBlock`, and `WriteBlock`'s size computation AND actual write -- all four
+    switched to the same `AuxPowBlockWithWitness(block)` formatter, which is what guarantees the
+    precomputed size used for file-position bookkeeping always agrees with the size actually
+    written (a real risk if these had been fixed inconsistently with each other).
+  - **Fixed: BIP152 compact blocks, `src/blockencodings.h`.** `CBlockHeaderAndShortTxIDs`'s own
+    `header` field serialization switched to `Using<AuxPowHeaderFormatter>(obj.header)`. Traced the
+    full reconstruction path in `blockencodings.cpp` (`CBlockHeaderAndShortTxIDs`'s constructor from
+    a `CBlock`, `PartiallyDownloadedBlock::InitData`'s `header = cmpctblock.header`, and
+    `FillBlock`'s `block = header`) and confirmed all of it already correctly carries `auxpow`
+    through via ordinary C++ member copy/assignment -- ONLY the wire (de)serialization line itself
+    needed the explicit fix; the surrounding reconstruction logic needed zero changes.
+  - **Explicitly deferred, not silently skipped: HEADERS-message relay (`net_processing.cpp`).**
+    The real send/receive shape is more delicate than BLOCK: send constructs `std::vector<CBlock>`
+    (each header wrapped as a degenerate 0-transaction `CBlock`, historically so the same
+    block-shaped wire format serves both) and serializes it generically; receive instead
+    deserializes into `std::vector<CBlockHeader>` via a **manual per-element loop**
+    (`vRecv >> headers[n]; ReadCompactSize(vRecv); // ignore tx count; assume it is 0.`) that is not
+    a simple generic-vector swap. Fixing this correctly needs its own dedicated pass on both the
+    asymmetric send construction and the manual receive loop, not a copy-paste of the BLOCK-message
+    fix. Real consequence while deferred: a node running headers-first sync will not receive an
+    AuxPoW proof via HEADERS alone; it still arrives correctly via a full BLOCK message (now fixed).
+  - **Explicitly deferred, lower priority: BIP37 `CMerkleBlock`/filtered-block path.** A separate,
+    legacy, bloom-filter-based wire type; not touched, not audited for a header field.
+  - **Explicitly deferred, does not exist yet:** GBT/`createauxblock`/mining -- no code path
+    currently constructs a real AuxPoW-flagged block to send in the first place; that's item 22 in
+    the "not yet done" list below.
+
+**4. Two-node transport test -- honestly partial, not overclaimed.** Ran a REAL two-process regtest
+test (`bitaicoind` A + B, real TCP loopback P2P, real `addnode`): mined 10 ordinary blocks on node A,
+confirmed node B received and matched the exact same tip hash via real BLOCK-message relay over the
+now-modified code paths above -- a genuine regression proof for the most invasive files touched this
+slice (net_processing.cpp, blockstorage.cpp), not a simulation. **What this explicitly does NOT
+prove, and was not built this pass:** a literal "node A sends a genuine AuxPoW-flagged block, node B
+receives it over real P2P and exposes the intact proof" run. Two real blockers, assessed rather than
+glossed over: (a) no code path yet exists that can make a real node actually PRODUCE an AuxPoW-
+flagged block through its normal mining pipeline (GBT/mining wiring doesn't exist -- see above), so
+node A cannot "just mine one"; (b) constructing and injecting one via a raw, hand-built P2P
+version/verack handshake plus a crafted BLOCK message is possible (this codebase has all the needed
+primitives -- `CMessageHeader`, the real serialize functions) but is itself a real, separate piece of
+test infrastructure not yet built, not a quick addition to this already-large pass. **What WAS
+proven instead, as the closest honest substitute:** the EXACT formatter functions now live in the
+real net_processing.cpp send/receive call sites (`AuxPowBlockWithWitness`/`AuxPowBlockNoWitness` --
+not a parallel reimplementation) are directly unit-tested round-tripping a real AuxPoW proof
+byte-for-byte (item 2's tests above). Building the literal raw-handshake two-node AuxPoW-block test
+is the natural, explicit next step if wanted, now that the wiring it would be testing actually
+exists.
+
+**Verified for real:** full rebuild of `bitcoind`/`bitcoin-cli`/`test_bitcoin` from clean after
+touching `net_processing.cpp`, `node/blockstorage.cpp`, and `src/blockencodings.h` (all three
+compiled and linked without error); the full test suite (**772 cases, zero regressions**); the real
+two-process regtest relay test described above.
+
+**Explicitly still NOT done, next slices (unchanged from before except as noted above):** splicing
+`CheckAuxPowRules()` into the real `ContextualCheckBlockHeader()` call path (mechanical now that
+storage exists, but touches a function with many existing call sites and deserves its own review,
+per instruction to keep this separate); `CheckProofOfWorkImpl`. The DAA branch (ASERT,
 sec.3/A) is validated as a standalone module (`contrib/asert_reference.py`, now with a proven
 arithmetic bound and Decred differential vectors -- see the Addendum below) but likewise not yet wired
 into `pow.cpp`'s real `GetNextWorkRequired` dispatch. New RPCs, the obsolete-node fork test (protocol

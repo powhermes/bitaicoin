@@ -12,6 +12,7 @@
 #include <auxpow.h>
 
 #include <chainparams.h>
+#include <consensus/merkle.h>
 #include <consensus/validation.h>
 #include <crypto/common.h>
 #include <hash.h>
@@ -740,7 +741,14 @@ BOOST_AUTO_TEST_CASE(deserialize_rejects_oversized_merkle_branch_claim)
     const Consensus::Params& params = chainParams->GetConsensus();
     CBlockHeader h = MakeHeaderWithAuxpow(TEST_CHAIN_ID, params);
     BOOST_REQUIRE(h.auxpow != nullptr);
-    h.auxpow->vChainMerkleBranch.assign(MAX_MERKLE_BRANCH_LENGTH + 1, uint256{});
+    // h.auxpow is now shared_ptr<const CAuxPow> (see the ownership-semantics
+    // decision in primitives/block.h) -- correctly cannot be mutated in
+    // place. Build a fresh, independent, mutable CAuxPow VALUE from the
+    // existing one, mutate that, then attach it as a new shared_ptr -- the
+    // only way to change a header's proof, by design.
+    CAuxPow oversized = *h.auxpow;
+    oversized.vChainMerkleBranch.assign(MAX_MERKLE_BRANCH_LENGTH + 1, uint256{});
+    h.auxpow = std::make_shared<CAuxPow>(oversized);
 
     DataStream ss;
     // Can't use SerializeBlockHeaderWithAuxPow directly since CAuxPow's own
@@ -779,6 +787,214 @@ BOOST_AUTO_TEST_CASE(direct_mining_header_serializes_without_auxpow_both_sides_o
     UnserializeBlockHeaderWithAuxPow(h2, ss);
     BOOST_CHECK(h2.auxpow == nullptr);
     BOOST_CHECK_EQUAL(h2.GetHash().GetHex(), h.GetHash().GetHex());
+}
+
+// --- Item 1: CBlockHeader::auxpow ownership/value semantics ---
+
+// Compile-time regression test: if CBlockHeader::auxpow is ever changed back
+// to a mutable std::shared_ptr<CAuxPow>, this static_assert fails to
+// compile, catching the regression immediately -- a stronger guarantee than
+// any runtime test could give for a type-system-level property.
+static_assert(std::is_same_v<decltype(*std::declval<CBlockHeader>().auxpow), const CAuxPow&>,
+              "CBlockHeader::auxpow must dereference to a const CAuxPow& -- shared, "
+              "immutable-after-construction ownership, matching CTransactionRef's own "
+              "established shared_ptr<const T> pattern in this codebase. See the "
+              "ownership design-decision comment on CBlockHeader::auxpow in "
+              "primitives/block.h before changing this.");
+
+BOOST_AUTO_TEST_CASE(auxpow_ownership_is_shared_and_immutable)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlockHeader original = MakeHeaderWithAuxpow(TEST_CHAIN_ID, params);
+    BOOST_REQUIRE(original.auxpow != nullptr);
+
+    // Ordinary copy: intended to be a cheap, shared-ownership copy (same
+    // pointee, matching CTransactionRef's own semantics) -- NOT a deep copy,
+    // and NOT independent storage. This is fine and intentional precisely
+    // BECAUSE the pointee is immutable: two headers pointing at the same
+    // proof object can never observe divergent behavior through it.
+    CBlockHeader copy = original;
+    BOOST_CHECK(copy.auxpow == original.auxpow); // same shared_ptr control block / pointee
+    BOOST_CHECK_EQUAL(copy.auxpow->parentBlock.GetHash().GetHex(),
+                       original.auxpow->parentBlock.GetHash().GetHex());
+
+    // The CORRECT way to give a header a genuinely different proof: build a
+    // brand-new CAuxPow value and a brand-new shared_ptr, never mutate the
+    // existing one in place (which the type system forbids anyway -- see
+    // the static_assert above). Demonstrates the original is left
+    // completely untouched by attaching something new to the copy.
+    CAuxPow differentProofValue = BuildValidAuxPow(TestAuxBlockHash(), EASY_BITS, params);
+    differentProofValue.parentBlock.nNonce += 1; // make it a genuinely different object
+    copy.auxpow = std::make_shared<CAuxPow>(differentProofValue);
+
+    BOOST_CHECK(copy.auxpow != original.auxpow); // now genuinely different objects
+    BOOST_CHECK(original.auxpow != nullptr);     // original still has ITS OWN proof, untouched
+    BOOST_CHECK_EQUAL(original.auxpow->parentBlock.nNonce,
+                       MakeHeaderWithAuxpow(TEST_CHAIN_ID, params).auxpow->parentBlock.nNonce);
+}
+
+// --- Item 2: full CBlock (header + auxpow + real transactions) serialization ---
+
+namespace {
+
+CMutableTransaction MakeSimpleSpendLikeTx(uint32_t lockTimeForUniqueness)
+{
+    CMutableTransaction tx;
+    tx.version = 2;
+    CTxIn in;
+    in.prevout = COutPoint(Txid::FromUint256(uint256{"5555555555555555555555555555555555555555555555555555555555555555"}), 0);
+    in.scriptSig = CScript() << OP_1;
+    tx.vin.push_back(in);
+    CTxOut out;
+    out.nValue = 5000000000LL;
+    out.scriptPubKey = CScript() << OP_TRUE;
+    tx.vout.push_back(out);
+    tx.nLockTime = lockTimeForUniqueness; // vary this so each tx has a distinct txid
+    return tx;
+}
+
+// Builds a real, multi-transaction CBlock (a coinbase-like tx plus one
+// ordinary tx), with a correctly computed merkle root, optionally carrying
+// an AuxPoW proof.
+CBlock MakeRealBlock(bool withAuxpow, const Consensus::Params& params)
+{
+    CBlock block;
+    block.nVersion = withAuxpow ? MakeAuxpowVersion(TEST_CHAIN_ID, 1) : 536870912;
+    block.hashPrevBlock = uint256{"6666666666666666666666666666666666666666666666666666666666666666"};
+    block.nTime = 1789815555;
+    block.nBits = EASY_BITS;
+    block.nNonce = 7;
+
+    block.vtx.push_back(MakeTransactionRef(MakeSimpleSpendLikeTx(0)));
+    block.vtx.push_back(MakeTransactionRef(MakeSimpleSpendLikeTx(1)));
+    bool mutated = false;
+    block.hashMerkleRoot = BlockMerkleRoot(block, &mutated);
+    BOOST_REQUIRE(!mutated);
+
+    if (withAuxpow) {
+        block.auxpow = std::make_shared<CAuxPow>(BuildValidAuxPow(block.GetHash(), EASY_BITS, params));
+    }
+    return block;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(block_serialize_no_auxpow_matches_generic_serialize)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlock block = MakeRealBlock(/*withAuxpow=*/false, params);
+    BOOST_CHECK(!block.IsAuxpow());
+
+    // The EXISTING, unchanged generic CBlock serialization (CBlock's own
+    // SERIALIZE_METHODS, untouched by this slice) -- real call sites wrap
+    // with TX_WITH_WITNESS(block), matching net_processing.cpp's own usage.
+    DataStream genericStream;
+    genericStream << TX_WITH_WITNESS(block);
+
+    DataStream auxpowAwareStream;
+    SerializeBlockWithAuxPow(block, auxpowAwareStream);
+
+    BOOST_CHECK_EQUAL(HexStr(genericStream), HexStr(auxpowAwareStream));
+}
+
+BOOST_AUTO_TEST_CASE(block_carries_auxpow_proof_exactly_once_and_roundtrips)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlock block = MakeRealBlock(/*withAuxpow=*/true, params);
+    BOOST_REQUIRE(block.auxpow != nullptr);
+
+    DataStream ss;
+    SerializeBlockWithAuxPow(block, ss);
+
+    // "Exactly once": the raw merge-mining tag bytes must appear exactly
+    // once in the fully serialized block, not duplicated and not appearing
+    // again inside vtx by coincidence.
+    const std::string hex = HexStr(ss);
+    std::string tagHex;
+    for (unsigned char c : MERGE_MINING_HEADER) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", c);
+        tagHex += buf;
+    }
+    size_t firstPos = hex.find(tagHex);
+    BOOST_REQUIRE(firstPos != std::string::npos);
+    BOOST_CHECK(hex.find(tagHex, firstPos + tagHex.size()) == std::string::npos);
+
+    CBlock block2;
+    UnserializeBlockWithAuxPow(block2, ss);
+    BOOST_REQUIRE(block2.auxpow != nullptr);
+    BOOST_CHECK_EQUAL(block2.GetHash().GetHex(), block.GetHash().GetHex());
+    BOOST_CHECK_EQUAL(block2.vtx.size(), block.vtx.size());
+    for (size_t i = 0; i < block.vtx.size(); ++i) {
+        BOOST_CHECK_EQUAL(block2.vtx[i]->GetHash().ToUint256().GetHex(),
+                           block.vtx[i]->GetHash().ToUint256().GetHex());
+    }
+    BOOST_CHECK(block2.auxpow->parentBlock.GetHash() == block.auxpow->parentBlock.GetHash());
+}
+
+BOOST_AUTO_TEST_CASE(block_hash_unaffected_by_auxpow_in_full_block_context)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlock withProof = MakeRealBlock(/*withAuxpow=*/true, params);
+    CBlock withoutProof = withProof; // shares the same base fields + vtx (CBlock copy)
+    withoutProof.auxpow.reset();
+    // nVersion still has the AUXPOW bit in this copy, which is fine for this
+    // pure hash-invariance check -- GetHash() must not look at auxpow OR
+    // reject based on nVersion (that's CheckAuxPowRules's job, not GetHash's).
+    BOOST_CHECK_EQUAL(withProof.GetHash().GetHex(), withoutProof.GetHash().GetHex());
+}
+
+BOOST_AUTO_TEST_CASE(block_roundtrip_direct_mining_with_real_multi_tx_vtx)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlock block = MakeRealBlock(/*withAuxpow=*/false, params);
+    BOOST_CHECK_EQUAL(block.vtx.size(), 2u);
+
+    DataStream ss;
+    SerializeBlockWithAuxPow(block, ss);
+    CBlock block2;
+    UnserializeBlockWithAuxPow(block2, ss);
+
+    BOOST_CHECK(block2.auxpow == nullptr);
+    BOOST_CHECK_EQUAL(block2.GetHash().GetHex(), block.GetHash().GetHex());
+    BOOST_REQUIRE_EQUAL(block2.vtx.size(), 2u);
+    BOOST_CHECK_EQUAL(block2.vtx[0]->GetHash().ToUint256().GetHex(), block.vtx[0]->GetHash().ToUint256().GetHex());
+    BOOST_CHECK_EQUAL(block2.vtx[1]->GetHash().ToUint256().GetHex(), block.vtx[1]->GetHash().ToUint256().GetHex());
+    // Re-verify the merkle root still matches what BlockMerkleRoot computes
+    // fresh from the round-tripped transactions -- proves vtx content, not
+    // just count, survived intact.
+    bool mutated = false;
+    BOOST_CHECK(BlockMerkleRoot(block2, &mutated) == block.hashMerkleRoot);
+    BOOST_CHECK(!mutated);
+}
+
+BOOST_AUTO_TEST_CASE(block_malformed_truncated_auxpow_rejected_cleanly)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlock block = MakeRealBlock(/*withAuxpow=*/true, params);
+
+    DataStream full;
+    SerializeBlockWithAuxPow(block, full);
+
+    // Truncate to roughly 70% of the real length -- lands somewhere inside
+    // the auxpow payload for this fixture (well past the 6 fixed-size base
+    // header fields, before vtx), simulating a peer that disconnected
+    // mid-send or a corrupted disk read.
+    const std::string fullHex = HexStr(full);
+    const std::string truncatedHex = fullHex.substr(0, fullHex.size() * 7 / 10);
+    // Even-length-safe (a hex string must have an even number of digits).
+    const std::string evenTruncatedHex = truncatedHex.substr(0, truncatedHex.size() - (truncatedHex.size() % 2));
+    const std::vector<unsigned char> bytes = ParseHex(evenTruncatedHex);
+    DataStream truncated{std::span<const uint8_t>(bytes)};
+
+    CBlock block2;
+    BOOST_CHECK_THROW(UnserializeBlockWithAuxPow(block2, truncated), std::ios_base::failure);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

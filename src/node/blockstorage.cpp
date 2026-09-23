@@ -5,6 +5,7 @@
 #include <node/blockstorage.h>
 
 #include <arith_uint256.h>
+#include <auxpow.h>
 #include <chain.h>
 #include <consensus/params.h>
 #include <crypto/hex_base.h>
@@ -932,7 +933,7 @@ void BlockManager::UpdateBlockInfo(const CBlock& block, unsigned int nHeight, co
     }
 
     // Update the file information with the current block.
-    const unsigned int added_size = ::GetSerializeSize(TX_WITH_WITNESS(block));
+    const unsigned int added_size = ::GetSerializeSize(AuxPowBlockWithWitness(block));
     const int nFile = pos.nFile;
     if (static_cast<int>(m_blockfile_info.size()) <= nFile) {
         m_blockfile_info.resize(nFile + 1);
@@ -1045,7 +1046,7 @@ bool BlockManager::ReadBlock(CBlock& block, const FlatFilePos& pos, const std::o
 
     try {
         // Read block
-        SpanReader{*block_data} >> TX_WITH_WITNESS(block);
+        SpanReader{*block_data} >> AuxPowBlockWithWitness(block);
     } catch (const std::exception& e) {
         LogError("Deserialize or I/O error - %s at %s while reading block", e.what(), pos.ToString());
         return false;
@@ -1133,7 +1134,7 @@ BlockManager::ReadRawBlockResult BlockManager::ReadRawBlock(const FlatFilePos& p
 
 FlatFilePos BlockManager::WriteBlock(const CBlock& block, int nHeight)
 {
-    const unsigned int block_size{static_cast<unsigned int>(GetSerializeSize(TX_WITH_WITNESS(block)))};
+    const unsigned int block_size{static_cast<unsigned int>(GetSerializeSize(AuxPowBlockWithWitness(block)))};
     FlatFilePos pos{FindNextBlockPos(block_size + STORAGE_HEADER_BYTES, nHeight, block.GetBlockTime())};
     if (pos.IsNull()) {
         LogError("FindNextBlockPos failed for %s while writing block", pos.ToString());
@@ -1152,7 +1153,7 @@ FlatFilePos BlockManager::WriteBlock(const CBlock& block, int nHeight)
         fileout << GetParams().MessageStart() << block_size;
         pos.nPos += STORAGE_HEADER_BYTES;
         // Write block
-        fileout << TX_WITH_WITNESS(block);
+        fileout << AuxPowBlockWithWitness(block);
     }
 
     if (file.fclose() != 0) {

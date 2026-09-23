@@ -5,6 +5,7 @@
 #ifndef BITCOIN_BLOCKENCODINGS_H
 #define BITCOIN_BLOCKENCODINGS_H
 
+#include <auxpow.h>
 #include <crypto/siphash.h>
 #include <primitives/block.h>
 
@@ -120,7 +121,12 @@ public:
 
     SERIALIZE_METHODS(CBlockHeaderAndShortTxIDs, obj)
     {
-        READWRITE(obj.header, obj.nonce, Using<VectorFormatter<CustomUintFormatter<SHORTTXIDS_LENGTH>>>(obj.shorttxids), obj.prefilledtxn);
+        // AuxPoW addition: Using<AuxPowHeaderFormatter> carries any attached
+        // auxpow proof through the compact-block header field exactly like
+        // the plain generic serialize did for every other field -- see
+        // src/auxpow.h. Byte-for-byte identical to plain `obj.header` for
+        // any header with no auxpow attached.
+        READWRITE(Using<AuxPowHeaderFormatter>(obj.header), obj.nonce, Using<VectorFormatter<CustomUintFormatter<SHORTTXIDS_LENGTH>>>(obj.shorttxids), obj.prefilledtxn);
         if (ser_action.ForRead()) {
             if (obj.BlockTxCount() > std::numeric_limits<uint16_t>::max()) {
                 throw std::ios_base::failure("indexes overflowed 16 bits");
