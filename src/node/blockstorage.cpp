@@ -119,7 +119,8 @@ bool BlockTreeDB::ReadFlag(const std::string& name, bool& fValue)
     return true;
 }
 
-bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
+bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex,
+                                      std::function<std::optional<CBlockHeader>(const CBlockIndex&)> readAuxPowHeader, const util::SignalInterrupt& interrupt)
 {
     AssertLockHeld(::cs_main);
     std::unique_ptr<CDBIterator> pcursor(NewIterator());
@@ -144,7 +145,6 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 pindexNew->nTime          = diskindex.nTime;
                 pindexNew->nBits          = diskindex.nBits;
                 pindexNew->nNonce         = diskindex.nNonce;
-                pindexNew->auxpow         = diskindex.auxpow; // BitAIcoin AuxPoW addition
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nTx            = diskindex.nTx;
 
@@ -155,13 +155,26 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 // hash is NOT required to satisfy nBits (the parent block's hash
                 // is, via CAuxPow::Check()) -- the old call would have wrongly
                 // rejected every valid AuxPoW block on every node restart/reindex.
-                // Replaced with the header-aware dispatcher (src/auxpow.h), which
-                // is behavior-identical to the old call for every block that
-                // exists today or that exists before AuxPoW activation (no header
-                // has the AUXPOW bit set until then), and correctly defers to
-                // CAuxPow::Check() for one that does.
+                // Replaced with the header-aware dispatcher (src/auxpow.h).
+                //
+                // On-demand-storage addition: CBlockIndex no longer carries a
+                // resident auxpow field (see chain.h), so for an AuxPoW-flagged
+                // entry the real proof must be read from the block file before
+                // this check can mean anything (GetBlockHeader() alone always
+                // returns a proof-less header now). For every block that exists
+                // today or that predates AuxPoW activation, IsAuxpowVersion is
+                // false and this is byte-for-byte the same as before.
+                CBlockHeader headerForPowCheck = pindexNew->GetBlockHeader();
+                if (IsAuxpowVersion(pindexNew->nVersion)) {
+                    auto fullHeader = readAuxPowHeader(*pindexNew);
+                    if (!fullHeader) {
+                        LogError("%s: failed to read AuxPoW proof from disk for %s (pruned or missing data)\n", __func__, pindexNew->ToString());
+                        return false;
+                    }
+                    headerForPowCheck = *fullHeader;
+                }
                 BlockValidationState state;
-                if (!CheckBitAIProofOfWork(pindexNew->GetBlockHeader(), consensusParams, state)) {
+                if (!CheckBitAIProofOfWork(headerForPowCheck, consensusParams, state)) {
                     LogError("%s: CheckBitAIProofOfWork failed: %s (%s)\n", __func__, pindexNew->ToString(), state.ToString());
                     return false;
                 }
@@ -439,7 +452,9 @@ CBlockIndex* BlockManager::InsertBlockIndex(const uint256& hash)
 bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockhash)
 {
     if (!m_block_tree_db->LoadBlockIndexGuts(
-            GetConsensus(), [this](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return this->InsertBlockIndex(hash); }, m_interrupt)) {
+            GetConsensus(), [this](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return this->InsertBlockIndex(hash); },
+            [this](const CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return this->ReadBlockHeaderWithAuxPow(index); },
+            m_interrupt)) {
         return false;
     }
 
@@ -1150,6 +1165,41 @@ BlockManager::ReadRawBlockResult BlockManager::ReadRawBlock(const FlatFilePos& p
     } catch (const std::exception& e) {
         LogError("Read from block file failed: %s for %s while reading raw block", e.what(), pos.ToString());
         return util::Unexpected{ReadRawError::IO};
+    }
+}
+
+std::optional<CBlockHeader> BlockManager::ReadBlockHeaderWithAuxPow(const CBlockIndex& index) const
+{
+    const FlatFilePos pos{WITH_LOCK(cs_main, return index.GetBlockPos())};
+    if (pos.nPos < STORAGE_HEADER_BYTES) {
+        // Same real cases ReadRawBlock guards against: pruned or
+        // default-constructed position -- the data simply isn't here.
+        return std::nullopt;
+    }
+    AutoFile filein{OpenBlockFile({pos.nFile, pos.nPos - STORAGE_HEADER_BYTES}, /*fReadOnly=*/true)};
+    if (filein.IsNull()) {
+        return std::nullopt;
+    }
+
+    try {
+        MessageStartChars blk_start;
+        unsigned int blk_size;
+        filein >> blk_start >> blk_size;
+        if (blk_start != GetParams().MessageStart() || blk_size > MAX_SIZE) {
+            return std::nullopt;
+        }
+        // Deliberately does NOT read blk_size bytes into memory: only the
+        // header (+ auxpow, if the version bit says so) is read, and the
+        // stream is simply closed afterward without consuming the
+        // remaining transaction bytes that follow in the file -- an
+        // efficient partial read, matching the whole point of this
+        // on-demand design.
+        CBlockHeader header;
+        UnserializeBlockHeaderWithAuxPow(header, filein);
+        return header;
+    } catch (const std::exception& e) {
+        LogError("Deserialize or I/O error - %s at %s while reading block header with auxpow", e.what(), pos.ToString());
+        return std::nullopt;
     }
 }
 

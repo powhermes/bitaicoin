@@ -106,7 +106,14 @@ public:
     void ReadReindexing(bool& fReindexing);
     void WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
-    bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
+    // BitAIcoin AuxPoW addition: `readAuxPowHeader` lets LoadBlockIndexGuts
+    // (a BlockTreeDB method, with no BlockManager instance of its own to
+    // call ReadBlockHeaderWithAuxPow on) fetch an AuxPoW-flagged entry's
+    // real proof on demand for the PoW re-validation below, mirroring the
+    // existing `insertBlockIndex` callback pattern rather than threading a
+    // BlockManager reference through this class.
+    bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex,
+                             std::function<std::optional<CBlockHeader>(const CBlockIndex&)> readAuxPowHeader, const util::SignalInterrupt& interrupt)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
 } // namespace kernel
@@ -470,6 +477,28 @@ public:
     bool ReadBlock(CBlock& block, const FlatFilePos& pos, const std::optional<uint256>& expected_hash) const;
     bool ReadBlock(CBlock& block, const CBlockIndex& index) const;
     ReadRawBlockResult ReadRawBlock(const FlatFilePos& pos, std::optional<std::pair<size_t, size_t>> block_part = std::nullopt) const;
+
+    /**
+     * BitAIcoin AuxPoW addition: on-demand header (+ auxpow proof, if the
+     * block has one) read from a blk*.dat file, WITHOUT reading the block's
+     * transactions at all. Mirrors ReadRawBlock's own file-opening and
+     * magic/size-prefix validation, then calls UnserializeBlockHeaderWithAuxPow
+     * directly on the open stream and stops there -- an efficient partial
+     * read, not "read the whole block into memory and discard most of it."
+     *
+     * This is the deliberate design choice made after a real scalability
+     * comparison (docs/AUXPOW_MILESTONE.md): CBlockIndex/CDiskBlockIndex do
+     * NOT keep a resident/persisted copy of the AuxPoW proof (unlike an
+     * earlier version of this codebase, which did) -- the proof lives only
+     * in the block file, exactly like every other Bitcoin Core block-body
+     * field, and is read on demand only when actually needed (HEADERS relay
+     * for an AuxPoW-flagged block; a future RPC/REST call that needs to
+     * expose the real proof). Returns std::nullopt if the block's data is
+     * unavailable (e.g. pruned) or malformed -- callers needing the proof
+     * for a pruned historical block cannot get it, the same limitation
+     * stock Bitcoin Core already has for full block bodies under pruning.
+     */
+    std::optional<CBlockHeader> ReadBlockHeaderWithAuxPow(const CBlockIndex& index) const;
 
     bool ReadBlockUndo(CBlockUndo& blockundo, const CBlockIndex& index) const;
 

@@ -205,6 +205,29 @@ static constexpr auto PRIVATE_BROADCAST_MAX_CONNECTION_LIFETIME{3min};
 
 // Internal stuff
 namespace {
+/**
+ * BitAIcoin AuxPoW addition: builds the header to announce for a given
+ * index entry, fetching the real proof from disk on demand when the entry
+ * is AuxPoW-flagged (CBlockIndex no longer keeps one resident -- see the
+ * scalability comparison in docs/AUXPOW_MILESTONE.md and the note on
+ * CBlockIndex in chain.h). For every non-AuxPoW entry (everything that
+ * exists today or predates activation), this is exactly as cheap as the
+ * plain `pindex->GetBlockHeader()` call it replaces -- no disk read at all.
+ * Returns std::nullopt only if an AuxPoW-flagged entry's proof genuinely
+ * can't be read (e.g. pruned) -- callers should fall back to an inv/skip
+ * that entry rather than announce a header claiming a proof they can't
+ * actually supply if asked for the full block.
+ */
+std::optional<CBlockHeader> GetHeaderForAnnounce(const CBlockIndex& index, node::BlockManager& blockman)
+{
+    if (!IsAuxpowVersion(index.nVersion)) {
+        return index.GetBlockHeader();
+    }
+    return blockman.ReadBlockHeaderWithAuxPow(index);
+}
+} // namespace
+
+namespace {
 /** Blocks that are in flight, and that are in the queue to be downloaded. */
 struct QueuedBlock {
     /** BlockIndex. We must have this since we only request blocks when we've already validated the header. */
@@ -4460,7 +4483,16 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         LogDebug(BCLog::NET, "getheaders %d to %s from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), pfrom.GetId());
         for (; pindex; pindex = m_chainman.ActiveChain().Next(pindex))
         {
-            vHeaders.emplace_back(pindex->GetBlockHeader());
+            // AuxPoW addition: fetches the real proof on demand for an
+            // AuxPoW-flagged entry (see GetHeaderForAnnounce above); a
+            // pruned/unreadable proof means this header can't be honestly
+            // announced with its proof intact, so stop here rather than
+            // silently sending a proof-less (and therefore unvalidatable)
+            // AuxPoW-flagged header -- the peer will simply see a shorter
+            // HEADERS response and can request further via a later getheaders.
+            auto header = GetHeaderForAnnounce(*pindex, m_chainman.m_blockman);
+            if (!header) break;
+            vHeaders.emplace_back(*header);
             if (--nLimit <= 0 || pindex->GetBlockHash() == hashStop)
                 break;
         }
@@ -5895,15 +5927,24 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                     }
                     pBestIndex = pindex;
                     if (fFoundStartingHeader) {
-                        // add this to the headers message
-                        vHeaders.emplace_back(pindex->GetBlockHeader());
+                        // add this to the headers message. AuxPoW addition:
+                        // fetches the real proof on demand for an AuxPoW-
+                        // flagged entry (see GetHeaderForAnnounce above); if
+                        // it can't be read (pruned), fall back to the
+                        // existing inv-relay path rather than announce a
+                        // proof-less AuxPoW header.
+                        auto header = GetHeaderForAnnounce(*pindex, m_chainman.m_blockman);
+                        if (!header) { fRevertToInv = true; break; }
+                        vHeaders.emplace_back(*header);
                     } else if (PeerHasHeader(&state, pindex)) {
                         continue; // keep looking for the first new block
                     } else if (pindex->pprev == nullptr || PeerHasHeader(&state, pindex->pprev)) {
                         // Peer doesn't have this header but they do have the prior one.
                         // Start sending headers.
                         fFoundStartingHeader = true;
-                        vHeaders.emplace_back(pindex->GetBlockHeader());
+                        auto header = GetHeaderForAnnounce(*pindex, m_chainman.m_blockman);
+                        if (!header) { fRevertToInv = true; break; }
+                        vHeaders.emplace_back(*header);
                     } else {
                         // Peer doesn't have this header or the prior one -- nothing will
                         // connect, so bail out.

@@ -273,6 +273,39 @@ bool CheckAuxPowRules(int32_t nVersion, int nHeight, const uint256& hashHeader, 
 static constexpr int32_t BITAI_AUXPOW_CHAIN_ID = 16969;
 
 /**
+ * Local copies of src/versionbits.h's VERSIONBITS_TOP_BITS/VERSIONBITS_TOP_MASK
+ * (0x20000000 / 0xE0000000), NOT #include'd from there: versionbits.h
+ * includes chain.h, which now includes THIS file (for CBlockIndex::auxpow),
+ * so auxpow.h including versionbits.h would be a circular include. These are
+ * long-standardized, stable BIP9 protocol constants (unlikely to ever change
+ * upstream), reproduced here only so this file can PROVE, at compile time,
+ * that BitAIcoin's chain-ID encoding never collides with BIP9's own marker
+ * bits -- see the static_assert below and the runtime defense in
+ * CheckBitAIProofOfWork() (auxpow.cpp), which is the actual enforcement;
+ * this header-only copy exists for the proof, not as a second source of
+ * truth for the real constant (auxpow.cpp separately #includes the real
+ * versionbits.h, which a .cpp file can do without a cycle).
+ */
+static constexpr int32_t AUXPOW_VERSIONBITS_TOP_MASK = 0xE0000000;
+static constexpr int32_t AUXPOW_VERSIONBITS_TOP_BITS = 0x20000000;
+
+/**
+ * PROVEN at compile time, not assumed: BitAIcoin's real AuxPoW chain ID,
+ * placed in nVersion's bits 16-31 the way MakeAuxpowVersion() does, never
+ * produces the BIP9 top-bits marker (0b001 in bits 29-31) -- i.e. a
+ * genuinely AuxPoW-flagged BitAIcoin header can never accidentally look
+ * like a BIP9-signaling version by construction, for THIS chain ID. (The
+ * runtime check in CheckBitAIProofOfWork() is still the real enforcement,
+ * covering any future encoding change; this is the belt to that
+ * suspenders, checked at every single compile rather than left as a
+ * one-time manual calculation.)
+ */
+static_assert((MakeAuxpowVersion(BITAI_AUXPOW_CHAIN_ID, 0) & AUXPOW_VERSIONBITS_TOP_MASK) != AUXPOW_VERSIONBITS_TOP_BITS,
+              "BITAI_AUXPOW_CHAIN_ID's encoding collides with the BIP9 versionbits top-bits marker -- "
+              "an AuxPoW-flagged header with this chain ID would be indistinguishable from a BIP9-signaling "
+              "version in the affected bits; choose a different chain ID or revisit the encoding before proceeding");
+
+/**
  * The single header-level proof-of-work decision point: "is this header's
  * OWN SELECTED proof mechanism (direct SHA256d, or AuxPoW) cryptographically
  * valid?" -- deliberately NOT a statement about whether that mechanism is

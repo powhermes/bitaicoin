@@ -53,10 +53,10 @@ class CAuxPow;
 static constexpr int32_t VERSION_AUXPOW = (1 << 8);
 static constexpr int32_t VERSION_CHAIN_ID_SHIFT = 16;
 
-inline int32_t GetBaseVersion(int32_t nVersion) { return nVersion % VERSION_AUXPOW; }
-inline int32_t GetChainId(int32_t nVersion) { return nVersion >> VERSION_CHAIN_ID_SHIFT; }
-inline bool IsAuxpowVersion(int32_t nVersion) { return (nVersion & VERSION_AUXPOW) != 0; }
-inline int32_t MakeAuxpowVersion(int32_t nChainId, int32_t nBaseVersion)
+constexpr int32_t GetBaseVersion(int32_t nVersion) { return nVersion % VERSION_AUXPOW; }
+constexpr int32_t GetChainId(int32_t nVersion) { return nVersion >> VERSION_CHAIN_ID_SHIFT; }
+constexpr bool IsAuxpowVersion(int32_t nVersion) { return (nVersion & VERSION_AUXPOW) != 0; }
+constexpr int32_t MakeAuxpowVersion(int32_t nChainId, int32_t nBaseVersion)
 {
     return (nChainId << VERSION_CHAIN_ID_SHIFT) | VERSION_AUXPOW | nBaseVersion;
 }

@@ -100,7 +100,7 @@ public:
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false;
         consensus.fPowNoRetargeting = false;
-        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 15; // BitAIcoin: was 28 (stock Bitcoin Core), which sits inside AuxPoW's permanently-reserved chain-ID field (bits 16-31, see docs/AUXPOW_MILESTONE.md) -- moved to keep that range genuinely unclaimed by any deployment, real or placeholder. TESTDUMMY is a permanently-NEVER_ACTIVE internal test-only placeholder (see versionbits_tests.cpp); this bit reassignment has zero effect on any real deployed behavior.
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0; // No activation delay
@@ -318,7 +318,7 @@ public:
                    "for the retarget multiply -- see docs/CONSENSUS.md point 6");
         }
 
-        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 15; // BitAIcoin: was 28 (stock Bitcoin Core), which sits inside AuxPoW's permanently-reserved chain-ID field (bits 16-31, see docs/AUXPOW_MILESTONE.md) -- moved to keep that range genuinely unclaimed by any deployment, real or placeholder. TESTDUMMY is a permanently-NEVER_ACTIVE internal test-only placeholder (see versionbits_tests.cpp); this bit reassignment has zero effect on any real deployed behavior.
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0;
@@ -454,7 +454,7 @@ public:
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.enforce_BIP94 = false;
         consensus.fPowNoRetargeting = false;
-        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 15; // BitAIcoin: was 28 (stock Bitcoin Core), which sits inside AuxPoW's permanently-reserved chain-ID field (bits 16-31, see docs/AUXPOW_MILESTONE.md) -- moved to keep that range genuinely unclaimed by any deployment, real or placeholder. TESTDUMMY is a permanently-NEVER_ACTIVE internal test-only placeholder (see versionbits_tests.cpp); this bit reassignment has zero effect on any real deployed behavior.
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0; // No activation delay
@@ -562,7 +562,7 @@ public:
         consensus.enforce_BIP94 = true;
         consensus.fPowNoRetargeting = false;
 
-        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 15; // BitAIcoin: was 28 (stock Bitcoin Core), which sits inside AuxPoW's permanently-reserved chain-ID field (bits 16-31, see docs/AUXPOW_MILESTONE.md) -- moved to keep that range genuinely unclaimed by any deployment, real or placeholder. TESTDUMMY is a permanently-NEVER_ACTIVE internal test-only placeholder (see versionbits_tests.cpp); this bit reassignment has zero effect on any real deployed behavior.
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0; // No activation delay
@@ -713,7 +713,7 @@ public:
         consensus.fPowNoRetargeting = false;
         consensus.MinBIP9WarningHeight = 0;
         consensus.powLimit = uint256{"00000377ae000000000000000000000000000000000000000000000000000000"};
-        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 15; // BitAIcoin: was 28 (stock Bitcoin Core), which sits inside AuxPoW's permanently-reserved chain-ID field (bits 16-31, see docs/AUXPOW_MILESTONE.md) -- moved to keep that range genuinely unclaimed by any deployment, real or placeholder. TESTDUMMY is a permanently-NEVER_ACTIVE internal test-only placeholder (see versionbits_tests.cpp); this bit reassignment has zero effect on any real deployed behavior.
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0; // No activation delay
@@ -803,7 +803,7 @@ public:
         consensus.enforce_BIP94 = opts.enforce_bip94;
         consensus.fPowNoRetargeting = true;
 
-        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 15; // BitAIcoin: was 28 (stock Bitcoin Core), which sits inside AuxPoW's permanently-reserved chain-ID field (bits 16-31, see docs/AUXPOW_MILESTONE.md) -- moved to keep that range genuinely unclaimed by any deployment, real or placeholder. TESTDUMMY is a permanently-NEVER_ACTIVE internal test-only placeholder (see versionbits_tests.cpp); this bit reassignment has zero effect on any real deployed behavior.
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = 0;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0; // No activation delay

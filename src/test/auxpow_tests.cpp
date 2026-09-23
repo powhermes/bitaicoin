@@ -1194,6 +1194,52 @@ BOOST_AUTO_TEST_CASE(check_bitai_pow_wrong_chain_id_in_version_fails)
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "auxpow-wrong-chain-id");
 }
 
+// --- BIP9 versionbits / AuxPoW chain-ID collision defense ---
+
+BOOST_AUTO_TEST_CASE(check_bitai_pow_rejects_versionbits_shaped_auxpow_header)
+{
+    // A header that is BOTH AuxPoW-flagged AND shaped like a BIP9-signaling
+    // version (top 3 bits = 0b001) is ambiguous by construction and must be
+    // rejected outright, regardless of whether the attached proof would
+    // otherwise be valid -- the real defense added after the versionbits
+    // audit (docs/AUXPOW_MILESTONE.md).
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlockHeader h = MakeHeaderWithAuxpow(BITAI_AUXPOW_CHAIN_ID, params);
+    BOOST_REQUIRE(h.auxpow != nullptr);
+    // Force the top 3 bits to the BIP9 marker (0b001) while leaving the
+    // AUXPOW bit and chain-ID-adjacent low bits alone, to construct the
+    // exact ambiguous shape this check exists to catch.
+    h.nVersion = (h.nVersion & ~AUXPOW_VERSIONBITS_TOP_MASK) | AUXPOW_VERSIONBITS_TOP_BITS;
+    BOOST_REQUIRE(h.IsAuxpow());
+    BOOST_REQUIRE_EQUAL(h.nVersion & AUXPOW_VERSIONBITS_TOP_MASK, AUXPOW_VERSIONBITS_TOP_BITS);
+
+    BlockValidationState state;
+    BOOST_CHECK(!CheckBitAIProofOfWork(h, params, state));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "auxpow-versionbits-collision");
+}
+
+BOOST_AUTO_TEST_CASE(no_live_versionbits_deployment_reserves_an_auxpow_bit)
+{
+    // Real, tested invariant (not just documentation): no versionbits
+    // deployment defined for ANY BitAIcoin chain type may claim bit 8
+    // (VERSION_AUXPOW itself) or any bit in [16,31] (the AuxPoW chain-ID
+    // field). Iterates the REAL chain params for every chain type this
+    // fork defines, not a hand-picked subset.
+    for (auto chainType : {ChainType::MAIN, ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET, ChainType::REGTEST}) {
+        const auto params = CreateChainParams(*m_node.args, chainType);
+        const Consensus::Params& consensus = params->GetConsensus();
+        for (int i = 0; i < (int)Consensus::MAX_VERSION_BITS_DEPLOYMENTS; ++i) {
+            const int bit = consensus.vDeployments[i].bit;
+            BOOST_CHECK_MESSAGE(bit != 8, "a versionbits deployment claims bit 8 (VERSION_AUXPOW) for chain type "
+                                              << static_cast<int>(chainType) << ", deployment index " << i);
+            BOOST_CHECK_MESSAGE(bit < 16 || bit > 31, "a versionbits deployment claims a bit in [16,31] "
+                                                       "(AuxPoW's chain-ID field) for chain type "
+                                                           << static_cast<int>(chainType) << ", deployment index " << i);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // --- Item 5: the real AuxPoW transport + acceptance test, before splicing
@@ -1347,14 +1393,25 @@ BOOST_AUTO_TEST_CASE(real_auxpow_block_transported_and_accepted_by_chainstateman
     bool newBlock = false;
     BOOST_CHECK(Assert(m_node.chainman)->ProcessNewBlock(received, /*force_processing=*/true, /*min_pow_checked=*/true, &newBlock));
 
-    // The node's own index now knows about this block, WITH its proof
-    // intact -- proving the whole pipeline, including the CBlockIndex
-    // capture point (chain.h), not just isolated function calls.
+    // The node's own index now knows about this block -- on-demand storage
+    // design (docs/AUXPOW_MILESTONE.md): CBlockIndex itself stays lean
+    // (IsAuxpowVersion(nVersion) is the only resident indicator; no
+    // resident proof), and the real proof is read back from the block file
+    // via ReadBlockHeaderWithAuxPow(), proving the WHOLE on-demand pipeline
+    // end to end -- capture at acceptance time, storage on disk only,
+    // correct retrieval on demand -- not just isolated function calls.
     const CBlockIndex* pindex = WITH_LOCK(::cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(expectedHash));
     BOOST_REQUIRE(pindex != nullptr);
-    BOOST_CHECK(pindex->auxpow != nullptr);
     BOOST_CHECK(IsAuxpowVersion(pindex->nVersion));
     BOOST_CHECK_EQUAL(pindex->GetBlockHeader().GetHash().GetHex(), expectedHash.GetHex());
+    // GetBlockHeader() itself is deliberately proof-less now (pure, no I/O):
+    BOOST_CHECK(pindex->GetBlockHeader().auxpow == nullptr);
+
+    auto onDemand = m_node.chainman->m_blockman.ReadBlockHeaderWithAuxPow(*pindex);
+    BOOST_REQUIRE(onDemand.has_value());
+    BOOST_REQUIRE(onDemand->auxpow != nullptr);
+    BOOST_CHECK_EQUAL(onDemand->GetHash().GetHex(), expectedHash.GetHex());
+    BOOST_CHECK(onDemand->auxpow->parentBlock.GetHash() == auxBlock->auxpow->parentBlock.GetHash());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

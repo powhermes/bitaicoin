@@ -8,6 +8,7 @@
 #include <hash.h>
 #include <pow.h>
 #include <script/script.h>
+#include <versionbits.h>
 
 #include <cstring>
 
@@ -278,6 +279,27 @@ bool CheckBitAIProofOfWork(const CBlockHeader& header, const Consensus::Params& 
                                   "high-hash", "proof of work failed");
         }
         return true;
+    }
+
+    // BIP9-versionbits/AuxPoW-chain-ID collision defense, frozen 2026-09-23
+    // after a real acceptance test proved this is not theoretical (see
+    // docs/AUXPOW_MILESTONE.md's versionbits section for the full audit):
+    // BIP9 signaling uses ALL 29 low bits of nVersion (VERSIONBITS_NUM_BITS
+    // = 29) with a fixed 3-bit marker (0b001) in the TOP 3 bits (29-31);
+    // AuxPoW's chain-ID field occupies bits 16-31, meaning its own top 3
+    // bits (29-31) are exactly BIP9's marker position. A header cannot be
+    // BOTH "shaped like a BIP9-signaling version" AND "AuxPoW-flagged with
+    // a well-defined chain ID" at the same time without ambiguity -- reject
+    // outright rather than silently pick an interpretation. BitAIcoin's own
+    // chain ID (16969 = 0x4249, top-3-bits of the 16-bit value = 0b010) does
+    // NOT collide with the 0b001 marker today (verified, not assumed -- see
+    // the static_assert below), but this check makes that a PROVEN,
+    // CODE-ENFORCED property of any header presented for validation, not a
+    // coincidence relied upon silently.
+    if ((header.nVersion & VERSIONBITS_TOP_MASK) == VERSIONBITS_TOP_BITS) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                              "auxpow-versionbits-collision",
+                              "AuxPoW-flagged header's version is shaped like a BIP9 versionbits signal; ambiguous, rejected");
     }
 
     // AUXPOW block: the header's own hash is deliberately NOT checked

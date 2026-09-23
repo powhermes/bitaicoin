@@ -466,6 +466,140 @@ confirming relay to node B, restarting node A entirely -- exercising the new `CD
 persistence and `LoadBlockIndexGuts`'s new dispatcher call for real -- and confirming both nodes still
 match tip hash exactly after reload).
 
+**Status update (2026-09-23, two architectural decisions frozen + implemented, still BEFORE splicing
+`CheckAuxPowRules()`).** The real transport/acceptance test from the previous pass was strong enough
+to surface two genuine architectural questions worth resolving while the chain is still private,
+rather than after activation. Both are now frozen, implemented, and verified -- not left as
+recommendations.
+
+### Decision 1: BIP9 versionbits vs. AuxPoW's nVersion encoding
+
+**Real, not theoretical -- proven by the previous pass's own test failing.** Audited precisely
+(`src/versionbits.cpp`/`versionbits_impl.h`): BIP9 uses ALL 29 low bits of `nVersion`
+(`VERSIONBITS_NUM_BITS = 29`) for deployment signaling, with a FIXED 3-bit marker (`0b001`) in the TOP
+3 bits (29-31) -- `Condition()` requires `(nVersion & VERSIONBITS_TOP_MASK) == VERSIONBITS_TOP_BITS`
+(`0x20000000`/`0xE0000000`) before treating ANY bit as a real signal. AuxPoW's chain-ID field occupies
+`nVersion` bits 16-31 -- meaning its own top 3 bits sit EXACTLY at BIP9's marker position, and its flag
+bit (8) sits squarely inside BIP9's 29-bit signaling range.
+
+Audited BitAIcoin's real, live deployment configuration for every chain type (`src/kernel/chainparams.cpp`):
+only two deployments exist, `DEPLOYMENT_TESTDUMMY` (bit 28) and `DEPLOYMENT_TAPROOT` (bit 2), BOTH
+hardcoded `nStartTime = NEVER_ACTIVE` -- meaning `ComputeBlockVersion` can never actually set either
+bit today (confirmed, not assumed: this matches the plain `0x20000000`-shaped version this whole
+milestone's own tests have observed `BlockAssembler` produce). BitAIcoin's chosen chain ID (16969 =
+`0x4249`) happens to have top-3-bits `0b010`, NOT `0b001` -- no live collision today, by coincidence,
+not by design.
+
+Compared the three options laid out explicitly: (A) classic Namecoin/Dogecoin encoding, formally
+retiring BIP9 versionbits at/around activation; (B) a limited versionbits scheme with the AuxPoW
+bit/chain-ID range permanently reserved and proven non-colliding; (C) move AuxPoW identification
+outside `nVersion` entirely (real BIP9 compatibility, real classic-AuxPoW-tooling incompatibility).
+**Chose Option A, formalized and code-enforced** (not just documentation) -- matching classic
+Namecoin/Dogecoin/Syscoin wire semantics (this milestone's own named references), which don't layer
+BIP9 versionbits under AuxPoW the way this fork's inherited stock code structurally allows:
+- **Reserved bit 8 and bits [16,31] permanently** for AuxPoW; no BitAIcoin versionbits deployment,
+  current or future, may claim them. Found a REAL, existing violation while writing the test for this:
+  `DEPLOYMENT_TESTDUMMY`'s bit 28 sits inside the reserved chain-ID range, across every chain type.
+  Fixed by reassigning it to bit 15 (`src/kernel/chainparams.cpp`, all 6 chain-type definitions) --
+  zero real-world effect, since TESTDUMMY is a permanently-`NEVER_ACTIVE` internal placeholder used
+  only by `versionbits_tests.cpp`'s own state-machine tests, referenced there symbolically, never by
+  hardcoded bit value.
+- **Defensive runtime check, `CheckBitAIProofOfWork`** (`src/auxpow.cpp`): rejects outright any header
+  that is BOTH AuxPoW-flagged AND shaped like a BIP9-signaling version
+  (`(nVersion & VERSIONBITS_TOP_MASK) == VERSIONBITS_TOP_BITS`) -- ambiguous by construction, rejected
+  rather than silently interpreted one way. This is the REAL enforcement, independent of chain-ID
+  value or future encoding changes.
+- **Compile-time proof, `auxpow.h`**: a `static_assert` confirms `BITAI_AUXPOW_CHAIN_ID`'s encoding
+  never produces the BIP9 marker, checked at every compile, not left as a one-time manual calculation
+  (local copies of the two BIP9 constants are used to avoid a real circular include: `versionbits.h`
+  includes `chain.h`, which now -- see Decision 2 -- no longer needs to include `auxpow.h` either, but
+  did during development, so the header-only copy was kept as the simpler, permanent fix).
+- **Real, tested invariant, not just documentation**: a new test
+  (`no_live_versionbits_deployment_reserves_an_auxpow_bit`) iterates the REAL chain params for every
+  chain type this fork defines and asserts none collide -- this is what caught the TESTDUMMY bug
+  above, and will catch a future contributor's mistake via CI rather than relying on someone reading
+  this document first.
+- Two new tests total (the collision-rejection test plus the reservation-invariant test).
+
+### Decision 2: `CBlockIndex`/`CDiskBlockIndex` resident AuxPoW proof vs. on-demand disk read
+
+**Real, measured comparison, not a guess.** Measured a realistic serialized `CAuxPow` size directly
+(a small standalone tool linked against the real `bitcoin_common` library, not estimated): a minimal
+single-tx-parent-block proof is 231 bytes; a modest 2-level coinbase merkle branch (~4-tx parent) is
+295 bytes; an 11-level branch (2048-tx parent, closer to a real mature Bitcoin block) is 583 bytes --
+**~600 bytes is the realistic per-block figure** for a chain actually merge-mined against real
+Bitcoin. The (now-reverted) resident design added this as a PERMANENT, PER-BLOCK cost in two places:
+  - **`CDiskBlockIndex`'s own leveldb block-index DB entry** (persisted, never pruned, loaded at every
+    startup): at ~600 bytes/block, a mature merge-mined chain reaches **~600 MB extra at 1,000,000
+    blocks, ~3 GB at 5,000,000, ~6 GB at 10,000,000** -- purely for data real usage needs only
+    occasionally (serving a HEADERS request or a future RPC), not on every ordinary index scan.
+  - **Resident `CBlockIndex` C++ objects in RAM**: the deserialized, heap-allocated object graph
+    (`CTransaction`'s own STL vectors, `CScript` prevector overhead, shared_ptr control blocks) is
+    larger than the raw serialized bytes -- a defensible estimate is **~1.0-1.5 GB extra resident
+    memory at 1,000,000 AuxPoW blocks, ~5-7.5 GB at 5,000,000, ~10-15 GB at 10,000,000** -- clearly
+    untenable for an ordinary node operator's machine at real chain-history scale.
+  - The `shared_ptr<const CAuxPow>` slot itself (16 bytes) on EVERY `CBlockIndex`, even non-AuxPoW
+    ones, was a smaller but still real, permanent, unconditional tax (~160 MB at 10,000,000 blocks)
+    the on-demand design avoids entirely, since `IsAuxpowVersion(nVersion)` (already resident, zero
+    marginal cost) is sufficient to know whether a proof exists at all.
+
+**Chose the on-demand design** (matching the real precedent named: Viacoin Core 30.x's approach),
+per the explicit default ("prefer the on-demand disk-header approach unless there is a strong measured
+reason to keep the proof resident" -- no such reason was found; the measured numbers all point the
+other way). Implemented, not just decided:
+  - **Reverted** `CBlockIndex::auxpow` and `CDiskBlockIndex`'s persistence of it entirely (`chain.h`).
+    `CBlockIndex` carries no more AuxPoW-specific state than `nVersion` already gave it for free.
+    `CBlockIndex::GetBlockHeader()` is now, correctly, ALWAYS proof-less (a pure, no-I/O function, as
+    it should be) -- callers needing the real proof must ask for it explicitly.
+  - **Added `BlockManager::ReadBlockHeaderWithAuxPow()`** (`node/blockstorage.h`/`.cpp`): opens the
+    block file at the index's recorded position (mirroring `ReadRawBlock`'s own file-opening and
+    magic/size-prefix validation) and calls `UnserializeBlockHeaderWithAuxPow` DIRECTLY on the open
+    stream -- deliberately does NOT read the block's transactions into memory at all, an efficient
+    partial read matching the entire point of "on demand," not "read the whole block and discard most
+    of it."
+  - **Rewired every real call site** that previously relied on `CBlockIndex::GetBlockHeader()` for a
+    proof-bearing header: both real HEADERS-announce sites in `net_processing.cpp` now go through a
+    small new helper, `GetHeaderForAnnounce()`, which calls the on-demand read only for
+    AuxPoW-flagged entries (zero extra cost for anything else) and falls back to the existing
+    `fRevertToInv`/break-out-of-the-loop path if the proof genuinely can't be read (matching how this
+    code already handles other "can't cleanly announce" cases). `LoadBlockIndexGuts`
+    (`node/blockstorage.cpp`) -- which re-validates PoW for every historical block on every ordinary
+    startup, confirmed to be STOCK, pre-existing Bitcoin Core behavior, not something introduced this
+    milestone -- now fetches the real proof on demand via a new callback parameter
+    (`readAuxPowHeader`, threaded through from `BlockManager::LoadBlockIndex`, mirroring the
+    already-existing `insertBlockIndex` callback pattern, since `LoadBlockIndexGuts` is a
+    `BlockTreeDB` method with no `BlockManager` instance of its own to call the read on).
+  - **Real trade-off, disclosed rather than hidden**: this means an ordinary node startup now does a
+    genuine blk-file random-access read for every HISTORICAL AuxPoW-flagged block, to re-derive its
+    PoW validity from scratch, every time -- a real I/O cost proportional to AuxPoW-block count that
+    the (now-reverted) resident design didn't have. This is judged an acceptable trade against
+    multi-GB permanent resident memory/DB growth, and is a separate, disclosed opportunity for a
+    FUTURE optimization (e.g. trusting `nStatus`'s already-recorded `BLOCK_VALID_HEADER` for an
+    ordinary restart and only fully re-deriving during an explicit `-reindex`) -- not implemented here,
+    since it would be a change to stock-inherited validation behavior beyond AuxPoW's own scope.
+  - **Prune-mode verified, not assumed**: a pruned node deletes old `blk*.dat` files, so
+    `ReadBlockHeaderWithAuxPow()` correctly returns `std::nullopt` for a pruned historical AuxPoW
+    block -- **the identical, pre-existing limitation stock Bitcoin Core already has for full block
+    BODIES under pruning** (`ReadBlock`/`ReadRawBlock` already fail the same way for a pruned
+    position), not a new limitation this design introduces. What a pruned node keeps regardless,
+    unaffected by any of this: the lean block-index metadata for EVERY header (height, hash, `nBits`,
+    `nVersion`, chainwork) is never pruned (pruning only removes `blk`/`rev` data files, never the
+    block-index DB) -- so a pruned node can always validate chain-of-headers/difficulty continuity and
+    knows WHICH historical blocks were AuxPoW-flagged, even for ones whose actual proof it can no
+    longer reproduce or re-serve.
+  - Updated the real transport+acceptance test from the previous pass to verify the on-demand
+    mechanism end to end (not just that acceptance succeeds): after `ProcessNewBlock`, confirms
+    `GetBlockHeader()` is correctly proof-less, then calls `ReadBlockHeaderWithAuxPow()` and confirms
+    it returns the real, correct proof read back from the block file -- a stronger test than the
+    previous resident-field check, since it exercises the actual on-demand code path for real.
+
+**Verified for real:** full clean rebuilds (multiple passes, after catching and fixing 2 more real
+bugs -- `ReadBlockHeaderWithAuxPow` initially called directly from `BlockTreeDB::LoadBlockIndexGuts`,
+which doesn't have a `BlockManager` instance to call it on, fixed via the callback-parameter pattern;
+and the TESTDUMMY bit-28 collision the new reservation-invariant test caught on its first run); the
+full test suite (**782 cases, zero regressions**); a real two-process regtest test including a full
+node restart, confirming ordinary (non-AuxPoW) operation is completely unaffected by either change.
+
 **Explicitly still NOT done, next slice (per instruction, now the very next step):** splicing
 `CheckAuxPowRules()` into the real `ContextualCheckBlockHeader()` call path. The DAA branch (ASERT,
 sec.3/A) is validated as a standalone module (`contrib/asert_reference.py`, now with a proven
