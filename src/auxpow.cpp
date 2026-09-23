@@ -261,6 +261,17 @@ bool CheckAuxPowRules(int32_t nVersion, int nHeight, const uint256& hashHeader, 
                               "AuxPoW version's chain ID does not match this chain's registered ID");
     }
 
+    // Redundant with CheckBitAIProofOfWork()'s own check, deliberately (same
+    // defense-in-depth pattern as the wrong-chain-id check above): this
+    // function is also independently callable/testable on its own, per its
+    // own doc comment, so it must not rely on the OTHER function having
+    // already run.
+    if ((nVersion & VERSION_RESERVED_MASK) != 0) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                              "auxpow-reserved-bits-set",
+                              "AuxPoW version sets bits 9-15, which must be zero");
+    }
+
     if (auxpow == nullptr) {
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
                               "auxpow-missing",
@@ -329,6 +340,25 @@ bool CheckBitAIProofOfWork(const CBlockHeader& header, const Consensus::Params& 
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
                               "auxpow-wrong-chain-id",
                               "AuxPoW version's chain ID does not match BitAIcoin's registered ID");
+    }
+
+    // Bits 9-15 are unused by any current definition (see the layout comment
+    // on VERSION_AUXPOW in primitives/block.h) and required to be zero,
+    // frozen 2026-09-23 after review: real classic AuxPoW tooling
+    // (Namecoin/Dogecoin/Syscoin-style) only ever produces small base
+    // versions (comfortably under 256, i.e. bits 8+ already zero before the
+    // chain-ID/flag bits are OR'd in), so rejecting a header that sets any of
+    // these seven bits costs zero real-world compatibility while closing a
+    // malleability gap: without this check, two byte-distinct headers could
+    // encode the identical proof and identical effective chain ID, differing
+    // only in these otherwise-meaningless bits. MakeAuxpowVersion() is also
+    // fixed (separately) to never itself produce a nonzero value here, but
+    // this check is the actual consensus-level enforcement against any
+    // OTHER header-construction path, including ones outside this codebase.
+    if ((header.nVersion & VERSION_RESERVED_MASK) != 0) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                              "auxpow-reserved-bits-set",
+                              "AuxPoW version sets bits 9-15, which must be zero");
     }
 
     return header.auxpow->Check(header.GetHash(), BITAI_AUXPOW_CHAIN_ID, header.nBits, params, state);

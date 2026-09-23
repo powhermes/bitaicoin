@@ -5,6 +5,7 @@
 
 #include <rest.h>
 
+#include <auxpow.h>
 #include <blockfilter.h>
 #include <chain.h>
 #include <chainparams.h>
@@ -451,7 +452,13 @@ static bool rest_block(const std::any& context,
     case RESTResponseFormat::JSON: {
         if (tx_verbosity) {
             CBlock block{};
-            SpanReader{*block_data} >> TX_WITH_WITNESS(block);
+            // Real bug found via functional testing (docs/AUXPOW_MILESTONE.md
+            // sec.5, amendment 3): same class of gap as the identical fix in
+            // getblock() (src/rpc/blockchain.cpp) and DecodeHexBlk()
+            // (src/core_io.cpp) -- this REST JSON path was never updated to
+            // the auxpow-aware formatter when AuxPoW's own serialization
+            // slice landed.
+            SpanReader{*block_data} >> AuxPowBlockWithWitness(block);
             UniValue objBlock = blockToJSON(chainman.m_blockman, block, *tip, *pblockindex, *tx_verbosity, chainman.GetConsensus().powLimit);
             std::string strJSON = objBlock.write() + "\n";
             req->WriteHeader("Content-Type", "application/json");

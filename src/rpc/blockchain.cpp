@@ -5,6 +5,7 @@
 
 #include <rpc/blockchain.h>
 
+#include <auxpow.h>
 #include <blockfilter.h>
 #include <chain.h>
 #include <chainparams.h>
@@ -863,7 +864,18 @@ static RPCHelpMan getblock()
     }
 
     CBlock block{};
-    SpanReader{block_data} >> TX_WITH_WITNESS(block);
+    // Real bug found via functional testing (docs/AUXPOW_MILESTONE.md sec.5,
+    // amendment 3): this used to be the plain, non-AuxPoW-aware
+    // TX_WITH_WITNESS(block) -- correct for the raw hex path just above
+    // (which never deserializes, only hex-encodes block_data untouched) but
+    // wrong here, where the bytes are actually parsed into a CBlock for
+    // JSON display. For an AuxPoW-flagged block this misread the auxpow
+    // payload's own bytes as the start of `vtx`, producing a corrupted
+    // block silently rather than failing cleanly -- caught via
+    // test/functional/feature_auxpow_prune.py, not by inspection. Fixed to
+    // the same formatter every other real block-deserialization call site
+    // already uses (src/auxpow.h).
+    SpanReader{block_data} >> AuxPowBlockWithWitness(block);
 
     TxVerbosity tx_verbosity;
     if (verbosity == 1) {

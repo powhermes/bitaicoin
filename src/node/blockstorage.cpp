@@ -165,18 +165,45 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 // today or that predates AuxPoW activation, IsAuxpowVersion is
                 // false and this is byte-for-byte the same as before.
                 CBlockHeader headerForPowCheck = pindexNew->GetBlockHeader();
+                bool skipPowRecheck = false;
                 if (IsAuxpowVersion(pindexNew->nVersion)) {
                     auto fullHeader = readAuxPowHeader(*pindexNew);
                     if (!fullHeader) {
-                        LogError("%s: failed to read AuxPoW proof from disk for %s (pruned or missing data)\n", __func__, pindexNew->ToString());
+                        // Real bug found via functional testing
+                        // (docs/AUXPOW_MILESTONE.md sec.5, amendment 3): a
+                        // pruned AuxPoW block's proof is, BY DESIGN, gone --
+                        // this is the on-demand storage design's real,
+                        // load-bearing trade-off (see chain.h's comment on
+                        // CBlockIndex), not a corruption. Returning `false`
+                        // unconditionally here (as an earlier pass did)
+                        // means a pruned node can never restart again after
+                        // pruning past its first AuxPoW block -- a real,
+                        // reproduced "Error loading block database" startup
+                        // failure, not a theoretical concern. Distinguish
+                        // the two cases via the same BLOCK_HAVE_DATA flag
+                        // pruning itself clears (BlockManager::
+                        // PruneOneBlockFile): if data is genuinely expected
+                        // to be present and still can't be read, that IS a
+                        // real corruption and must still fail loudly; if the
+                        // block is legitimately pruned, trust this entry's
+                        // already-persisted nStatus (recorded when the block
+                        // was first, fully validated) instead of demanding
+                        // data that pruning has deliberately deleted.
+                        if (pindexNew->nStatus & BLOCK_HAVE_DATA) {
+                            LogError("%s: failed to read AuxPoW proof from disk for %s (data present but unreadable -- likely corruption)\n", __func__, pindexNew->ToString());
+                            return false;
+                        }
+                        skipPowRecheck = true;
+                    } else {
+                        headerForPowCheck = *fullHeader;
+                    }
+                }
+                if (!skipPowRecheck) {
+                    BlockValidationState state;
+                    if (!CheckBitAIProofOfWork(headerForPowCheck, consensusParams, state)) {
+                        LogError("%s: CheckBitAIProofOfWork failed: %s (%s)\n", __func__, pindexNew->ToString(), state.ToString());
                         return false;
                     }
-                    headerForPowCheck = *fullHeader;
-                }
-                BlockValidationState state;
-                if (!CheckBitAIProofOfWork(headerForPowCheck, consensusParams, state)) {
-                    LogError("%s: CheckBitAIProofOfWork failed: %s (%s)\n", __func__, pindexNew->ToString(), state.ToString());
-                    return false;
                 }
 
                 pcursor->Next();

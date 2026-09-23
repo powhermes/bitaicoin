@@ -36,11 +36,41 @@ class CAuxPow;
  * that BOTH this file (CBlockHeader::IsAuxpow()) and auxpow.h can use the
  * same single definition without a circular include between them.
  *
+ *   nVersion bits 0-7           -- base version (caller-supplied; not itself
+ *                                  interpreted by AuxPoW code).
+ *   nVersion bits 9-15          -- UNUSED, required to be zero on any
+ *                                  AuxPoW-flagged header (enforced in
+ *                                  CheckBitAIProofOfWork(), auxpow.cpp) --
+ *                                  see docs/AUXPOW_MILESTONE.md sec.5 for why
+ *                                  "required zero" was chosen over "left
+ *                                  unconstrained": real classic AuxPoW
+ *                                  tooling (Namecoin/Dogecoin/Syscoin-style)
+ *                                  only ever produces small base versions
+ *                                  (comfortably under 256), so this closes a
+ *                                  real malleability gap at zero compat cost.
  *   nVersion bit 8 (0x100)      -- VERSION_AUXPOW: this header carries a
  *                                  CAuxPow structure and MUST be validated
  *                                  via merge-mining, not via its own hash.
  *   nVersion bits 16-31         -- the merge-mined chain's ID (BitAIcoin's is
- *                                  16969 / 0x4249, "BI").
+ *                                  16969 / 0x4249, "BI"). Fixed by AuxPoW's
+ *                                  own encoding; not available to any BIP9
+ *                                  deployment, ever, on an AuxPoW-flagged
+ *                                  header.
+ *
+ * BitAIcoin retires BIP9/versionbits as a consensus deployment mechanism for
+ * the AuxPoW era (docs/AUXPOW_MILESTONE.md sec.5, Option A, formalized
+ * 2026-09-23): an AuxPoW-flagged BitAIcoin header is, by design, NOT a
+ * BIP9-signaling version. For chain ID 16969, `0x4249 << 16 = 0x42490000`,
+ * whose top 3 bits are `0b010` -- not BIP9's required `0b001` -- so this
+ * particular chain ID was never actually a live collision; retiring BIP9
+ * anyway is a deliberate simplification, not a response to an active
+ * conflict, and costs nothing today since both of BitAIcoin's own
+ * deployments (TESTDUMMY, TAPROOT) are already permanently NEVER_ACTIVE /
+ * FAILED (see src/test/auxpow_tests.cpp's
+ * bitaicoin_versionbits_deployments_are_permanently_inactive test). Any
+ * FUTURE signaling need must be designed as an explicit new consensus
+ * mechanism, not by accidentally reusing bits 0-7/9-15 as a "reduced BIP9
+ * namespace" -- no such namespace is defined or reserved by this code.
  *
  * PERMANENT DESIGN DECISION (2026-09-23, explicit, not to be "corrected"
  * later): post-activation, BOTH direct SHA256d mining (this bit unset) AND
@@ -52,13 +82,26 @@ class CAuxPow;
  */
 static constexpr int32_t VERSION_AUXPOW = (1 << 8);
 static constexpr int32_t VERSION_CHAIN_ID_SHIFT = 16;
+/** Bits 9-15: unused, required zero on AuxPoW headers -- see comment above. */
+static constexpr int32_t VERSION_RESERVED_MASK = 0x0000FE00;
 
 constexpr int32_t GetBaseVersion(int32_t nVersion) { return nVersion % VERSION_AUXPOW; }
 constexpr int32_t GetChainId(int32_t nVersion) { return nVersion >> VERSION_CHAIN_ID_SHIFT; }
 constexpr bool IsAuxpowVersion(int32_t nVersion) { return (nVersion & VERSION_AUXPOW) != 0; }
+/**
+ * `nBaseVersion` is masked to its low 8 bits before being combined --
+ * deliberately, not an oversight: a real bug (see
+ * docs/AUXPOW_MILESTONE.md sec.4's transport-test failure) came from a
+ * caller passing a whole pre-existing template version (itself carrying
+ * live BIP9 signaling bits) straight through as "base version", which then
+ * corrupted the encoded chain ID via the bitwise OR below (16969 became
+ * 25161). Masking here means no caller can ever reproduce that bug again by
+ * forgetting to pre-clean its input -- the function is safe by construction
+ * for any int32_t input, not just well-behaved ones.
+ */
 constexpr int32_t MakeAuxpowVersion(int32_t nChainId, int32_t nBaseVersion)
 {
-    return (nChainId << VERSION_CHAIN_ID_SHIFT) | VERSION_AUXPOW | nBaseVersion;
+    return (nChainId << VERSION_CHAIN_ID_SHIFT) | VERSION_AUXPOW | (nBaseVersion & (VERSION_AUXPOW - 1));
 }
 // --- end BitAIcoin AuxPoW addition ---
 

@@ -960,3 +960,112 @@ the specific height/hash/chainwork of a block chosen from that proven run gets r
 ### Confirmed unchanged
 Existing blocks 225430-225823 remain untouched -- nothing above alters how any existing block
 validates. Proceeding to the AuxPoW serialization/validation core next.
+
+## 5. Amendments after the versionbits/CBlockIndex-storage report (2026-09-23)
+
+Both audited decisions (Option A for versionbits; on-demand disk read for `CBlockIndex`, not
+resident/persisted) were confirmed correct by the report. Five amendments were required before
+proceeding to the live `CheckAuxPowRules()` splice; all five are done and green.
+
+### 5.1 Option A formalized precisely (not a "reduced BIP9 namespace")
+
+- Corrected framing: an AuxPoW-flagged BitAIcoin header is **not a BIP9-signaling block, by design**
+  -- not "BIP9 with fewer bits." `0x4249 << 16 = 0x42490000`, top 3 bits `0b010` (BIP9 requires
+  `0b001`): no *live* collision for this chain ID, but BIP9 is retired for the AuxPoW era regardless,
+  since both of `CBitAIcoinParams`'s own deployments (`TESTDUMMY`, `TAPROOT`) are already permanently
+  `NEVER_ACTIVE`/`FAILED` -- confirmed by a real test iterating the actual `ChainType::BITAICOIN`
+  params (`bitaicoin_versionbits_deployments_are_permanently_inactive`,
+  `src/test/auxpow_tests.cpp`), not assumed.
+- **`TESTDUMMY`'s bit reverted from 15 back to stock 28** in all 6 chain-type definitions
+  (`chainparams.cpp`): moving it was real, unnecessary divergence from upstream for a placeholder
+  that's either `NEVER_ACTIVE` (5 of 6 chain types) or, on `REGTEST` only (where `TESTDUMMY` is
+  intentionally left live for BIP9 test machinery, matching stock Bitcoin Core), already safely
+  contained by the encoding-level defenses below -- not by bit placement. Test
+  `auxpow_reserved_bit_leak_is_caught_as_wrong_chain_id_not_misinterpreted` demonstrates this
+  directly: a stray bit landing in the chain-ID field just changes the encoded chain ID, which the
+  existing wrong-chain-id check catches -- it was never silently misinterpreted.
+- **Bits 9-15 (previously inert/unconstrained) are now required to be zero** on any AuxPoW-flagged
+  header, enforced in both `CheckBitAIProofOfWork()` and `CheckAuxPowRules()`
+  (`auxpow-reserved-bits-set`). Real classic AuxPoW tooling (Namecoin/Dogecoin/Syscoin-style) only
+  ever produces small base versions well under 256, so this costs zero real compatibility while
+  closing a real malleability gap.
+- **Root-cause fix, not a workaround:** `MakeAuxpowVersion()` (`primitives/block.h`) now masks its
+  `nBaseVersion` parameter to bits 0-7 unconditionally before combining. This is the actual fix for
+  the chain-ID-corruption bug the transport test found earlier (a whole BIP9-signaling-shaped
+  template version passed as "base version" used to corrupt the encoded chain ID via OR) -- fixed at
+  the construction site, not just patched around in the one test that hit it.
+  (`make_auxpow_version_masks_a_dirty_base_version`.)
+
+### 5.2 On-demand `CBlockIndex` storage: kept as-is, confirmed by the numbers
+
+No design change. Restated with the precise, sizeof()-grounded figures from the report: realistic
+proof ~583 bytes serialized, ~0.7-1.1 KB/block resident with real allocator/object overhead if made
+resident (~1 GB at 1M AuxPoW blocks), vs. ~600 MB/1M blocks if persisted in `CDiskBlockIndex`, vs.
+**zero** additional bytes either way for the on-demand design actually implemented.
+
+### 5.3 Pruning: NOT identical to stock, precisely documented, and a real startup bug fixed
+
+Corrected claim: a stock pruned node still keeps every 80-byte header resident in `CBlockIndex`
+forever. A BitAIcoin pruned node additionally loses the **AuxPoW proof** once its blk file is
+pruned -- the lean `CBlockIndex` metadata (`IsAuxpowVersion()` etc.) is, like stock headers, never
+pruned, but the proof genuinely is gone, by design.
+
+**Real, node-level functional test added:** `test/functional/feature_auxpow_prune.py` (registered in
+`test_runner.py`'s `BASE_SCRIPTS`), using a new `test/functional/test_framework/auxpow.py` (a
+byte-for-byte Python port of the wire format, mirroring `src/auxpow.h` the way the C++ side itself
+mirrors Namecoin/Syscoin -- verified byte-identical against the real C++ deserializer via a
+standalone probe before being trusted). The test: mines a real chain, submits one real AuxPoW block
+over real P2P, restarts (proof still on-demand-readable), mines past `MIN_BLOCKS_TO_KEEP` plus
+enough margin to clear `-fastprune`'s own file-rollover boundary, prunes for real, restarts again,
+and sends a real `getheaders` request spanning the now-pruned block.
+
+**This test found four real, previously-undiscovered bugs**, all now fixed and covered:
+
+1. **`getblock` RPC (verbosity>=1)** deserialized the block body with the plain, non-AuxPoW-aware
+   `TX_WITH_WITNESS(block)` formatter instead of `AuxPowBlockWithWitness(block)` -- for any real
+   AuxPoW block this misread the auxpow payload's own bytes as the start of `vtx`, corrupting the
+   parsed block silently (not always throwing) and crashing on
+   `coinbaseTxToJSON`'s `!coinbase_tx.vin.empty()` check. Fixed in `src/rpc/blockchain.cpp`.
+2. **`DecodeHexBlk()`** (`src/core_io.cpp`, used by `submitblock` and `getblocktemplate`'s proposal
+   mode) had the identical bug -- fixed the same way. Real, positive side effect: RPC-submitted
+   AuxPoW blocks now decode correctly for the first time, though `submitauxblock`-style mining RPCs
+   remain a separate, later slice.
+3. **The REST API's JSON block-serving path** (`src/rest.cpp`) had the identical bug -- fixed.
+4. **`LoadBlockIndexGuts()` could never restart a pruned node again once it had pruned past its
+   first AuxPoW block** -- reproduced for real (`Error loading block database. Please restart with
+   -reindex...`), not theoretical. The PoW-recheck-at-startup logic treated "proof unreadable" as
+   fatal unconditionally; fixed to distinguish "pruned, and legitimately unavailable"
+   (`!(nStatus & BLOCK_HAVE_DATA)`, the exact flag `PruneOneBlockFile` clears) from "data expected
+   but unreadable" (genuine corruption, still fails loudly) -- trusting the block's already-recorded
+   `nStatus` for the former rather than demanding data pruning deliberately deleted. This was the
+   "trust nStatus for ordinary restarts" future-optimization noted-but-deferred in an earlier pass;
+   it turned out not to be optional -- a pruned node could not function at all without it.
+
+All four were caught by running a real node through real restarts and real pruning under the actual
+built binary -- none were reachable by the existing in-process `ChainstateManager` unit tests, which
+is exactly why this functional test was required before proceeding.
+
+### 5.4 Combined activation-boundary tests: AuxPoW (227808) vs. buried BIP34 (227931)
+
+Two exact-height tests added directly against `CheckAuxPowRules()`
+(`check_auxpow_rules_boundary_matches_real_activation_height_exactly` at 227807/227808/227809;
+`check_auxpow_rules_unaffected_by_nearby_bip34_boundary` at 227930/227931/227932), calling the
+function directly with the real literal heights rather than mining a real chain to ~227931 blocks
+(not a reasonable unit-test cost). Separately, `auxpow_block_coinbase_still_enforces_bip34_height`
+(`auxpow_transport_tests` suite) proves the structural fact through the real `ChainstateManager`
+pipeline: a real AuxPoW-flagged block with a deliberately-wrong coinbase height is rejected for
+`bad-cb-height` (BIP34's own reason, captured via the real `BlockChecked` validation-interface hook,
+the same mechanism `src/test/util/mining.cpp`'s own `ProcessBlock()` helper uses), not any
+`auxpow-*` reason -- proving AuxPoW's proof substitution never bypasses ordinary block-content
+validation. Together these show the two independently-height-gated mechanisms do not interact.
+
+### Verified for real
+Full clean rebuild; full unit test suite (788 cases, zero regressions, up from 782 -- 6 net new
+after replacing the superseded bit-position test with the stronger NEVER_ACTIVE invariant plus 7
+new tests); the new `feature_auxpow_prune.py` functional test green under the real `bitaicoind`
+binary via both direct invocation and `test_runner.py`. No half-life frozen. Existing history
+(225430-225823) confirmed untouched throughout.
+
+**Next: splice `CheckAuxPowRules()` into `ContextualCheckBlockHeader()` as its own commit**, per
+explicit authorization once these amendments and tests are green. ASERT dispatch and
+`createauxblock`/`submitauxblock` remain separate, later commits.

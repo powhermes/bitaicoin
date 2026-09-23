@@ -29,6 +29,7 @@
 #include <util/fs_helpers.h>
 #include <util/strencodings.h>
 #include <validation.h>
+#include <validationinterface.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -1219,24 +1220,173 @@ BOOST_AUTO_TEST_CASE(check_bitai_pow_rejects_versionbits_shaped_auxpow_header)
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "auxpow-versionbits-collision");
 }
 
-BOOST_AUTO_TEST_CASE(no_live_versionbits_deployment_reserves_an_auxpow_bit)
+BOOST_AUTO_TEST_CASE(bitaicoin_versionbits_deployments_are_permanently_inactive)
 {
-    // Real, tested invariant (not just documentation): no versionbits
-    // deployment defined for ANY BitAIcoin chain type may claim bit 8
-    // (VERSION_AUXPOW itself) or any bit in [16,31] (the AuxPoW chain-ID
-    // field). Iterates the REAL chain params for every chain type this
-    // fork defines, not a hand-picked subset.
-    for (auto chainType : {ChainType::MAIN, ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET, ChainType::REGTEST}) {
-        const auto params = CreateChainParams(*m_node.args, chainType);
-        const Consensus::Params& consensus = params->GetConsensus();
-        for (int i = 0; i < (int)Consensus::MAX_VERSION_BITS_DEPLOYMENTS; ++i) {
-            const int bit = consensus.vDeployments[i].bit;
-            BOOST_CHECK_MESSAGE(bit != 8, "a versionbits deployment claims bit 8 (VERSION_AUXPOW) for chain type "
-                                              << static_cast<int>(chainType) << ", deployment index " << i);
-            BOOST_CHECK_MESSAGE(bit < 16 || bit > 31, "a versionbits deployment claims a bit in [16,31] "
-                                                       "(AuxPoW's chain-ID field) for chain type "
-                                                           << static_cast<int>(chainType) << ", deployment index " << i);
-        }
+    // The REAL invariant this milestone relies on (2026-09-23 revisit,
+    // replacing an earlier bit-position-based check): retiring BIP9 for
+    // BitAIcoin (docs/AUXPOW_MILESTONE.md sec.5, Option A) is only correct
+    // if BitAIcoin's own chain params never actually let a deployment
+    // activate. Checked directly against AbstractThresholdConditionChecker's
+    // own documented behavior (versionbits.cpp: nStartTime == NEVER_ACTIVE
+    // unconditionally yields ThresholdState::FAILED at every height), not
+    // re-derived here -- this test only confirms the INPUT to that behavior
+    // (every deployment's nStartTime) for the one chain type that actually
+    // matters for AuxPoW: ChainType::BITAICOIN.
+    const auto params = CreateChainParams(*m_node.args, ChainType::BITAICOIN);
+    const Consensus::Params& consensus = params->GetConsensus();
+    for (int i = 0; i < (int)Consensus::MAX_VERSION_BITS_DEPLOYMENTS; ++i) {
+        BOOST_CHECK_MESSAGE(consensus.vDeployments[i].nStartTime == Consensus::BIP9Deployment::NEVER_ACTIVE,
+                             "BitAIcoin (ChainType::BITAICOIN) versionbits deployment index " << i
+                             << " is not NEVER_ACTIVE -- BIP9 is no longer treated as retired for this chain; "
+                                "re-read docs/AUXPOW_MILESTONE.md sec.5 before changing this");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_header_bits_9_to_15_must_be_zero)
+{
+    // The "required zero" half of the audited bits-9-15 decision
+    // (docs/AUXPOW_MILESTONE.md sec.5): a header that is otherwise a
+    // perfectly valid AuxPoW proof, but sets any of the seven currently
+    // unused bits, must be rejected -- not silently accepted as if those
+    // bits didn't exist.
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlockHeader h = MakeHeaderWithAuxpow(BITAI_AUXPOW_CHAIN_ID, params);
+    BOOST_REQUIRE(h.auxpow != nullptr);
+    BOOST_REQUIRE_EQUAL(h.nVersion & VERSION_RESERVED_MASK, 0);
+
+    // Re-mint the proof against the corrupted hash (setting bit 12 changes
+    // GetHash() since nVersion is part of the 6 base fields), so this test
+    // isolates the reserved-bits check itself rather than incidentally also
+    // failing on a stale proof commitment.
+    h.nVersion |= (1 << 12); // one of the seven reserved bits (9-15)
+    h.auxpow = std::make_shared<CAuxPow>(BuildValidAuxPow(h.GetHash(), EASY_BITS, params));
+    BOOST_REQUIRE_NE(h.nVersion & VERSION_RESERVED_MASK, 0);
+
+    BlockValidationState state;
+    BOOST_CHECK(!CheckBitAIProofOfWork(h, params, state));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "auxpow-reserved-bits-set");
+}
+
+BOOST_AUTO_TEST_CASE(make_auxpow_version_masks_a_dirty_base_version)
+{
+    // Regression test for the real bug found in the transport-acceptance
+    // test (docs/AUXPOW_MILESTONE.md sec.4): passing a whole pre-existing
+    // template nVersion (itself carrying live BIP9 signaling bits, e.g.
+    // 0x20000000-shaped) as "base version" used to corrupt the encoded chain
+    // ID via the bitwise OR. MakeAuxpowVersion() is now fixed to mask its
+    // base-version input to bits 0-7 unconditionally, so no caller can
+    // reproduce this by passing a dirty value.
+    const int32_t dirtyTemplateVersion = 0x20000004; // BIP9-signaling-shaped, base version 4 in the low byte
+    const int32_t v = MakeAuxpowVersion(BITAI_AUXPOW_CHAIN_ID, dirtyTemplateVersion);
+    BOOST_CHECK_EQUAL(GetChainId(v), BITAI_AUXPOW_CHAIN_ID);
+    BOOST_CHECK_EQUAL(GetBaseVersion(v), 4);
+    BOOST_CHECK_EQUAL(v & VERSION_RESERVED_MASK, 0);
+    BOOST_CHECK(IsAuxpowVersion(v));
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_reserved_bit_leak_is_caught_as_wrong_chain_id_not_misinterpreted)
+{
+    // Demonstrates WHY moving TESTDUMMY's bit was not actually necessary
+    // (docs/AUXPOW_MILESTONE.md sec.5): even without any bit-placement
+    // precaution, a stray bit landing inside AuxPoW's chain-ID field (bits
+    // 16-31) does not get silently misinterpreted -- it just changes the
+    // encoded chain ID, which the existing wrong-chain-id check already
+    // catches. Simulates what a hypothetical un-masked bit-28 signal
+    // (TESTDUMMY's real, unchanged stock bit) landing in that field would
+    // do: chain ID 16969 (0x4249, bit 12 of the 16-bit value is 0) becomes
+    // 16969 + 4096 = 21065 once bit 28 of nVersion (= bit 12 of the chain-ID
+    // field) is forced to 1.
+    BOOST_REQUIRE_EQUAL(BITAI_AUXPOW_CHAIN_ID & (1 << 12), 0); // precondition this test relies on
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlockHeader h = MakeHeaderWithAuxpow(BITAI_AUXPOW_CHAIN_ID, params);
+    h.nVersion |= (1 << 28); // corrupt as if a live deployment's signal bit leaked in here
+    h.auxpow = std::make_shared<CAuxPow>(BuildValidAuxPow(h.GetHash(), EASY_BITS, params));
+    BOOST_REQUIRE_EQUAL(GetChainId(h.nVersion), BITAI_AUXPOW_CHAIN_ID + 4096);
+
+    BlockValidationState state;
+    BOOST_CHECK(!CheckBitAIProofOfWork(h, params, state));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "auxpow-wrong-chain-id");
+}
+
+// --- Combined activation-boundary tests: AuxPoW (227808) vs. the nearby
+// buried BIP34 transition (227931) -- added per explicit instruction to
+// prove these two independent height-gated mechanisms do not interact.
+// HONEST SCOPE: CheckAuxPowRules() is exercised directly, at the real
+// literal height values, rather than by mining a real chain to height
+// ~227931 (which would require ~228,000 real blocks -- not a reasonable
+// unit-test cost). The separate, real-pipeline BIP34-non-bypass test lives
+// in the auxpow_transport_tests suite below, at whatever small real height
+// regtest's own BIP34Height (1) makes reachable -- proving the STRUCTURAL
+// fact (AuxPoW's proof substitution never touches BIP34's coinbase-height
+// check) rather than the literal mainnet height number.
+
+BOOST_AUTO_TEST_CASE(check_auxpow_rules_boundary_matches_real_activation_height_exactly)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    const uint256 hashAuxBlock = TestAuxBlockHash();
+    const int32_t v = MakeAuxpowVersion(TEST_CHAIN_ID, 1);
+    CAuxPow auxpow = BuildValidAuxPow(hashAuxBlock, EASY_BITS, params);
+
+    // 227807: pre-activation, AuxPoW-flagged -- rejected.
+    BlockValidationState s227807;
+    BOOST_CHECK(!CheckAuxPowRules(v, 227807, hashAuxBlock, EASY_BITS, &auxpow,
+                                  TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, s227807));
+    BOOST_CHECK_EQUAL(s227807.GetRejectReason(), "auxpow-before-activation");
+
+    // 227808: exactly at activation, AuxPoW-flagged with a valid proof -- accepted.
+    BOOST_REQUIRE_EQUAL(TEST_ACTIVATION_HEIGHT, 227808);
+    BlockValidationState s227808;
+    BOOST_CHECK(CheckAuxPowRules(v, 227808, hashAuxBlock, EASY_BITS, &auxpow,
+                                 TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, s227808));
+    BOOST_CHECK(s227808.IsValid());
+
+    // 227809: one block past activation -- still accepted, same as any other
+    // post-activation height.
+    BlockValidationState s227809;
+    BOOST_CHECK(CheckAuxPowRules(v, 227809, hashAuxBlock, EASY_BITS, &auxpow,
+                                 TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, s227809));
+    BOOST_CHECK(s227809.IsValid());
+
+    // Direct (non-AuxPoW) mining remains valid at all three heights, exactly
+    // as before/unrelated to AuxPoW's own activation.
+    for (int h : {227807, 227808, 227809}) {
+        BlockValidationState s;
+        BOOST_CHECK(CheckAuxPowRules(1 /* no AUXPOW bit */, h, hashAuxBlock, EASY_BITS,
+                                     nullptr, TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, s));
+        BOOST_CHECK(s.IsValid());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(check_auxpow_rules_unaffected_by_nearby_bip34_boundary)
+{
+    // AuxPoW's own height policy must give the IDENTICAL, unremarkable
+    // "ordinary post-activation" answer at 227930/227931/227932 (BIP34's own
+    // buried-activation heights) as it would at any other height well after
+    // its own 227808 activation -- proving the two mechanisms are not
+    // accidentally coupled through shared state or a shared height
+    // parameter. CheckAuxPowRules() takes no BIP34-related input at all,
+    // which this test confirms behaviorally, not just by reading the
+    // function signature.
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    const uint256 hashAuxBlock = TestAuxBlockHash();
+    const int32_t v = MakeAuxpowVersion(TEST_CHAIN_ID, 1);
+    CAuxPow auxpow = BuildValidAuxPow(hashAuxBlock, EASY_BITS, params);
+
+    BOOST_REQUIRE_EQUAL(params.BIP34Height, 1); // regtest's real, unrelated buried height -- sanity, not asserted about by CheckAuxPowRules
+    for (int h : {227930, 227931, 227932}) {
+        BlockValidationState sAux;
+        BOOST_CHECK(CheckAuxPowRules(v, h, hashAuxBlock, EASY_BITS, &auxpow,
+                                     TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, sAux));
+        BOOST_CHECK(sAux.IsValid());
+
+        BlockValidationState sDirect;
+        BOOST_CHECK(CheckAuxPowRules(1, h, hashAuxBlock, EASY_BITS, nullptr,
+                                     TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, sDirect));
+        BOOST_CHECK(sDirect.IsValid());
     }
 }
 
@@ -1412,6 +1562,87 @@ BOOST_AUTO_TEST_CASE(real_auxpow_block_transported_and_accepted_by_chainstateman
     BOOST_REQUIRE(onDemand->auxpow != nullptr);
     BOOST_CHECK_EQUAL(onDemand->GetHash().GetHex(), expectedHash.GetHex());
     BOOST_CHECK(onDemand->auxpow->parentBlock.GetHash() == auxBlock->auxpow->parentBlock.GetHash());
+}
+
+// --- "AuxPoW does not bypass BIP34" -- item 4 of the 2026-09-23 amendments.
+//
+// HONEST SCOPE: this proves the STRUCTURAL fact -- CheckBitAIProofOfWork()
+// only ever substitutes the proof-of-work check (CheckBlockHeader), and
+// never touches ContextualCheckBlock()'s ordinary coinbase-height
+// enforcement -- at whatever small real height regtest's own BIP34Height
+// (1) makes reachable in a unit test. Reaching the real mainnet BIP34
+// buried height (227931) would require mining ~228,000 real blocks in this
+// test, which is not a reasonable unit-test cost; the SEPARATE
+// check_auxpow_rules_unaffected_by_nearby_bip34_boundary test (above, in
+// auxpow_tests) instead proves AuxPoW's own height-policy function is
+// numerically unaffected by proximity to that literal height. Together the
+// two tests cover both halves of "these two independently height-gated
+// mechanisms do not interact": AuxPoW's own gate is indifferent to BIP34's
+// height value, and BIP34's own enforcement is indifferent to AuxPoW's
+// proof mechanism -- neither can be used to bypass the other.
+BOOST_AUTO_TEST_CASE(auxpow_block_coinbase_still_enforces_bip34_height)
+{
+    uint256 tip = Params().GenesisBlock().GetHash();
+    for (int i = 0; i < 3; ++i) {
+        tip = MineDirect(tip)->GetHash();
+    }
+    BOOST_REQUIRE_EQUAL(Params().GetConsensus().BIP34Height, 1); // regtest: BIP34 already enforced at every one of these heights
+    const uint32_t requiredBits = WITH_LOCK(::cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(tip)->nBits);
+
+    auto auxBlock = BuildTemplate(tip);
+    auxBlock->nVersion = MakeAuxpowVersion(BITAI_AUXPOW_CHAIN_ID, 4);
+    BOOST_REQUIRE_EQUAL(auxBlock->nBits, requiredBits);
+
+    // Deliberately WRONG coinbase height (BuildTemplate already set the
+    // correct one; overwrite it with a value that does not match
+    // pindexPrev->nHeight + 1) -- this is the ONLY thing wrong with this
+    // block; its AuxPoW proof is fully valid.
+    CMutableTransaction badCoinbase(*auxBlock->vtx[0]);
+    badCoinbase.vin[0].scriptSig = CScript{} << 999999 << OP_0;
+    auxBlock->vtx[0] = MakeTransactionRef(std::move(badCoinbase));
+    auxBlock->hashMerkleRoot = BlockMerkleRoot(*auxBlock);
+
+    const Consensus::Params& params = Params().GetConsensus();
+    CAuxPow proof = auxpow_tests::BuildValidAuxPow(auxBlock->GetHash(), requiredBits, params);
+    auxBlock->auxpow = std::make_shared<CAuxPow>(proof);
+
+    // Header-level acceptance (PoW/AuxPoW cryptographic validity only) must
+    // still succeed -- the coinbase height defect is invisible at this
+    // layer, exactly as it would be for a direct-mined block.
+    BlockValidationState headerState;
+    BOOST_CHECK(Assert(m_node.chainman)->ProcessNewBlockHeaders({{*auxBlock}}, true, headerState));
+    BOOST_CHECK(headerState.IsValid());
+
+    // Full-block acceptance must fail, and specifically for BIP34's own
+    // reason -- not any auxpow-* rejection -- proving the AuxPoW proof
+    // substitution did not exempt this block from ordinary content
+    // validation. ProcessNewBlock() itself has no BlockValidationState
+    // out-parameter (see its declaration in validation.h), so the real
+    // reject reason is captured the same way this codebase's own
+    // src/test/util/mining.cpp::ProcessBlock() does it: a CValidationInterface
+    // subscriber's BlockChecked() callback, which IS given the real state --
+    // not a parallel or re-derived check.
+    struct RejectReasonCatcher : public CValidationInterface {
+        const uint256 m_hash;
+        std::optional<BlockValidationState> m_state;
+        explicit RejectReasonCatcher(const uint256& hash) : m_hash{hash} {}
+        void BlockChecked(const std::shared_ptr<const CBlock>& block, const BlockValidationState& state) override
+        {
+            if (block->GetHash() != m_hash) return;
+            m_state = state;
+        }
+    };
+    RejectReasonCatcher catcher{auxBlock->GetHash()};
+    m_node.validation_signals->RegisterValidationInterface(&catcher);
+    bool newBlock = false;
+    bool accepted = Assert(m_node.chainman)->ProcessNewBlock(auxBlock, /*force_processing=*/true, /*min_pow_checked=*/true, &newBlock);
+    m_node.validation_signals->UnregisterValidationInterface(&catcher);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    BOOST_CHECK(!accepted);
+    BOOST_REQUIRE(catcher.m_state.has_value());
+    BOOST_CHECK(!catcher.m_state->IsValid());
+    BOOST_CHECK_EQUAL(catcher.m_state->GetRejectReason(), "bad-cb-height");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -5,6 +5,7 @@
 #include <core_io.h>
 
 #include <addresstype.h>
+#include <auxpow.h>
 #include <coins.h>
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
@@ -254,7 +255,20 @@ bool DecodeHexBlk(CBlock& block, const std::string& strHexBlk)
 
     std::vector<unsigned char> blockData(ParseHex(strHexBlk));
     try {
-        SpanReader{blockData} >> TX_WITH_WITNESS(block);
+        // Real bug found via functional testing (docs/AUXPOW_MILESTONE.md
+        // sec.5, amendment 3): this used to be the plain, non-AuxPoW-aware
+        // `TX_WITH_WITNESS(block)` -- left over from before AuxPoW's own
+        // serialization/storage slice, and never updated then. For an
+        // AuxPoW-flagged block, that plain formatter misreads the auxpow
+        // payload's own bytes as the start of `vtx`, silently producing a
+        // corrupted (but not always exception-throwing) block rather than
+        // failing cleanly. Fixed to the same auxpow-aware formatter every
+        // other real block-deserialization call site already uses (see
+        // src/auxpow.h). This is also what makes submitblock/RPC-submitted
+        // AuxPoW blocks decode correctly for the first time -- a real,
+        // positive side effect of fixing the RPC-layer gap this bug was
+        // found in, not a scope expansion in itself.
+        SpanReader{blockData} >> AuxPowBlockWithWitness(block);
     }
     catch (const std::exception&) {
         return false;
