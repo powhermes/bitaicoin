@@ -146,6 +146,18 @@ bool CAuxPow::Check(const uint256& hashAuxBlock, int32_t nChainId, uint32_t nBit
                               "auxpow-no-coinbase", "AuxPoW coinbase transaction missing or empty");
     }
 
+    // Malformed-data rejection, per explicit instruction: a branch longer
+    // than MAX_MERKLE_BRANCH_LENGTH cannot correspond to any real
+    // transaction position (2^32 leaves need at most 32 levels) and is
+    // rejected before any hashing work is done with it. This check used to
+    // exist only for vChainMerkleBranch below; added here for vMerkleBranch
+    // too while wiring up the wire-format size limits for this slice.
+    if (vMerkleBranch.size() > MAX_MERKLE_BRANCH_LENGTH) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                              "auxpow-coinbase-branch-too-long",
+                              "coinbase merkle branch has an implausible number of levels");
+    }
+
     // (2) Coinbase merkle branch must reproduce the parent block's own
     // merkle root, at the claimed index.
     const uint256 coinbaseHash = coinbaseTx->GetHash().ToUint256();
@@ -189,7 +201,7 @@ bool CAuxPow::Check(const uint256& hashAuxBlock, int32_t nChainId, uint32_t nBit
                               "auxpow-tree-size-invalid",
                               "committed chain merkle tree size is zero or unreasonably large");
     }
-    if (vChainMerkleBranch.size() > 32) { // 2^32 tree size would need at most 32 branch levels; anything more is malformed
+    if (vChainMerkleBranch.size() > MAX_MERKLE_BRANCH_LENGTH) {
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
                               "auxpow-chain-branch-too-long",
                               "chain merkle branch has an implausible number of levels");

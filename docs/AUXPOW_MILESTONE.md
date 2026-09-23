@@ -7,6 +7,35 @@ is touched, per the explicit instruction that opened this milestone (2026-09-23)
 Do not rewrite or invalidate any existing BitAIcoin block. This milestone only ever adds a
 height-gated branch at a height strictly above the current tip.
 
+## 0. PERMANENT POLICY: direct mining and AuxPoW are BOTH valid, forever, post-activation
+
+**This section is a permanent design decision (frozen 2026-09-23, explicit user instruction), not a
+transitional state. Do not "fix" this later to make AuxPoW mandatory, or to disable direct mining
+once AuxPoW exists, without re-opening this decision explicitly with the user first.**
+
+Post-activation (height >= the activation height, see sec.2), BitAIcoin accepts **both**:
+
+1. **Ordinary direct SHA256d BitAIcoin mining** (the AUXPOW version bit unset) -- exactly as today,
+   unchanged in every respect other than the DAA (sec.3).
+2. **AuxPoW / merged mining** (the AUXPOW version bit set, chain ID matching, a valid `CAuxPow` proof
+   attached) -- an *additional* accepted proof format.
+
+**AuxPoW is additive, never a replacement.** This is a deliberate, permanent divergence from
+Dogecoin's `fAllowLegacyBlocks=false` model, which eventually forces every block through AuxPoW.
+BitAIcoin does not want that dependency: making direct mining permanently invalid at some future
+height would mean the chain's ability to keep extending becomes dependent on an external Bitcoin pool
+or merge-mining coordinator continuing to exist and cooperate. Existing/direct miners must always be
+able to extend the chain on their own; Bitcoin/SHA256d pools can add AuxPoW support at any later time
+without requiring another consensus change to keep the chain alive in the meantime.
+
+**Both proof paths use the identical BitAIcoin-required target/chainwork semantics.** AuxPoW must
+never receive an easier target or special chainwork treatment relative to direct mining at the same
+height -- both are checked against the exact same `nBits` value BitAIcoin's own DAA computed for that
+height (see `CheckAuxPowRules()` in `src/auxpow.h`, which passes the header's own `nBits` -- not a
+separately-relaxed value -- into `CAuxPow::Check()`), and a block's chainwork contribution is a
+function of that same target regardless of which proof format satisfied it. There is no "AuxPoW
+bonus" and there must never be one.
+
 ## 1. Pre-AuxPoW baseline (recorded 2026-09-23, before any consensus change)
 
 - **Tip height:** 225823
@@ -163,14 +192,68 @@ added to `src/test/auxpow_tests.cpp` (now 17 total), covering the height boundar
 and proof-absent paths, and the chain-ID check. Verified for real: rebuilt from clean, ran the new
 cases (17/17 pass), then the full existing suite (756 cases, zero regressions) -- confirmed twice.
 
-**Explicitly still NOT done, next slices:** the `CBlockHeader` storage/serialization change itself
-(now scoped by the two hazards above, its own dedicated pass); splicing `CheckAuxPowRules()` into the
-real `ContextualCheckBlockHeader()` call path (mechanical once storage exists, but touches a function
-with many existing call sites and deserves its own review); `CheckProofOfWorkImpl` and net_processing
-header/block relay. The DAA branch (ASERT, sec.3/A) is validated as a standalone module
-(`contrib/asert_reference.py`, now with a proven arithmetic bound and Decred differential vectors --
-see the Addendum below) but likewise not yet wired into `pow.cpp`'s real `GetNextWorkRequired`
-dispatch. New RPCs, the obsolete-node fork test (protocol frozen in sec.C), and the stabilization
+**Status update (2026-09-23, dedicated storage/serialization slice): DONE, both hazards resolved for
+real, not worked around.** The arithmetic gate above was judged sufficiently strong (re-derived bound,
+independent Decred vectors) to proceed. Resolved:
+1. `CBlockHeader::auxpow` (`std::shared_ptr<CAuxPow>`) is now a real member, added to
+   `src/primitives/block.h`, using only a forward declaration (`class CAuxPow;`) -- confirmed by
+   compiling, `std::shared_ptr`'s destructor does NOT need the pointee's complete type (unlike
+   `unique_ptr`; its deleter is captured/type-erased at construction time), so no explicit out-of-line
+   special members were needed after all -- the second hazard was real but smaller than first assessed.
+2. `CBlockHeader::SERIALIZE_METHODS` (and therefore `GetHash()`) is **completely unchanged** -- still
+   only the six base fields, unconditionally, regardless of `auxpow`'s presence. The version-bit
+   helpers (`VERSION_AUXPOW`, `IsAuxpowVersion`, etc.) moved from `auxpow.h` into `primitives/block.h`
+   (single definition, used by both files, no circular include) so `CBlockHeader::IsAuxpow()` could be
+   added directly. The auxpow-aware wire format is a **separate, explicit pair of template functions**,
+   `SerializeBlockHeaderWithAuxPow`/`UnserializeBlockHeaderWithAuxPow` (`src/auxpow.h`), mirroring this
+   codebase's own existing `SerializeTransaction`/`UnserializeTransaction` split for txid-vs-wtxid --
+   real precedent, not invented. Works for any conforming Stream (network `DataStream`, disk `AutoFile`)
+   since it's templated exactly like that precedent.
+
+**A third, real, previously-latent bug was found and fixed while wiring this up** (not anticipated
+going in, and not present in the earlier CAuxPow tests, which only ever constructed CAuxPow objects
+directly and never actually serialized one over a stream until this slice): `CAuxPow::coinbaseTx` is
+a `CTransactionRef`, and this codebase's own transaction (de)serialization requires the stream to
+carry an explicit `TransactionSerParams` (via `TX_WITH_WITNESS(...)`/`TX_NO_WITNESS(...)`) -- a bare
+`DataStream`/`AutoFile` doesn't compile without it. Fixed by wrapping with `TX_NO_WITNESS`, which is
+also the semantically *correct* choice, not just the one that compiles: the coinbase merkle-inclusion
+check in `CAuxPow::Check()` uses `coinbaseTx->GetHash()` (the TXID, witness-excluded) to match
+`parentBlock.hashMerkleRoot`'s own TXID-based convention, so witness bytes have no bearing on this
+proof and would only add unnecessary size.
+
+**Tests, per every item on the explicit checklist, all passing:** header-hash invariance under
+changing/removing/adding the auxpow payload while base fields are held constant; header hash changing
+under each of the six base fields individually; a REAL header from BitAIcoin's live chain (height
+225823, fetched via `bitaicoin-cli` this pass) reconstructed field-by-field and confirmed to reproduce
+its exact known hash AND its exact known raw wire bytes -- concrete proof existing history is
+untouched, not just an assertion; serialize->deserialize->serialize round trips (both with and without
+an attached proof); byte-for-byte identical output between the new auxpow-aware serializer and the
+plain, unchanged `CBlockHeader` serializer for any non-AuxPoW header; network-style (`DataStream`) and
+disk-style (real `AutoFile` against an actual temp file) round trips, both passing; malformed-data
+rejection (AUXPOW bit set with no proof attached fails loudly on serialize; a truncated stream missing
+the auxpow payload throws on deserialize; an oversized claimed merkle-branch length is rejected before
+any hashing is attempted); direct-mining (non-AuxPoW) headers serializing identically regardless of
+height relative to 227808. 15 new test cases (27 total in the suite, up from 17).
+
+**Verified for real, three separate times this pass, not assumed:** (1) `test_bitcoin` rebuilt from
+clean and run -- 27/27 new+existing `auxpow_tests` cases pass, then the full suite (**766 cases, zero
+regressions**); (2) `bitaicoind`/`bitaicoin-cli` themselves rebuilt from clean and version-checked;
+(3) a genuine smoke test -- the newly built `bitaicoind` started fresh on a throwaway regtest datadir,
+a wallet created, 5 blocks mined and accepted, tip advanced to height 5, clean shutdown via `stop` --
+confirming the modified `CBlockHeader` works correctly in an actual running node, not only in unit
+tests. The real, separately-running live BitAIcoin node (synced to height 225823) was left completely
+untouched throughout -- no new binary was ever pointed at its datadir.
+
+**Explicitly still NOT done, next slices:** splicing `CheckAuxPowRules()` into the
+real `ContextualCheckBlockHeader()` call path (mechanical now that storage exists, but touches a
+function with many existing call sites and deserves its own review, per instruction to keep this
+separate); `CheckProofOfWorkImpl` and net_processing header/block relay (announcing/downloading an
+AuxPoW-carrying header over the wire, and `CBlock`'s own serialization, which still only carries the
+base header via `AsBase<CBlockHeader>` and was not touched this slice). The DAA branch (ASERT,
+sec.3/A) is validated as a standalone module (`contrib/asert_reference.py`, now with a proven
+arithmetic bound and Decred differential vectors -- see the Addendum below) but likewise not yet wired
+into `pow.cpp`'s real `GetNextWorkRequired` dispatch. New RPCs, the obsolete-node fork test (protocol
+frozen in sec.C), and the stabilization
 checkpoint (sec.D) all remain after that wiring lands.
 
 ## Addendum (2026-09-23): frozen details, before the first consensus commit

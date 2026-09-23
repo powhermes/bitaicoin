@@ -15,12 +15,17 @@
 #include <consensus/validation.h>
 #include <crypto/common.h>
 #include <hash.h>
+#include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <pow.h>
 #include <script/script.h>
 #include <serialize.h>
+#include <streams.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
+#include <util/fs.h>
+#include <util/fs_helpers.h>
+#include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -466,6 +471,314 @@ BOOST_AUTO_TEST_CASE(auxpow_rules_at_exact_activation_boundary)
     BOOST_CHECK(!CheckAuxPowRules(v, TEST_ACTIVATION_HEIGHT - 1, hashAuxBlock, EASY_BITS, &auxpow,
                                   TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, stateBefore));
     BOOST_CHECK_EQUAL(stateBefore.GetRejectReason(), "auxpow-before-activation");
+}
+
+// --- CBlockHeader/AuxPoW storage and serialization slice ---
+// (SerializeBlockHeaderWithAuxPow / UnserializeBlockHeaderWithAuxPow,
+// CBlockHeader::auxpow / IsAuxpow() -- see design-hazard comments in
+// primitives/block.h and auxpow.h for why these are a separate path from
+// CBlockHeader's own generic Serialize/GetHash().)
+
+namespace {
+
+// Builds a syntactically well-formed header with a REAL, Check()-valid
+// attached AuxPoW proof (reusing BuildValidAuxPow from earlier in this
+// file), for serialization round-trip and hash-invariance testing.
+CBlockHeader MakeHeaderWithAuxpow(int32_t chainId, const Consensus::Params& params)
+{
+    CBlockHeader h;
+    h.nVersion = MakeAuxpowVersion(chainId, 1);
+    h.hashPrevBlock = uint256{"1111111111111111111111111111111111111111111111111111111111111111"};
+    h.hashMerkleRoot = uint256{"2222222222222222222222222222222222222222222222222222222222222222"};
+    h.nTime = 1700000000;
+    h.nBits = EASY_BITS;
+    h.nNonce = 42;
+    h.auxpow = std::make_shared<CAuxPow>(BuildValidAuxPow(h.GetHash(), EASY_BITS, params));
+    return h;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(header_hash_covers_only_base_fields_not_auxpow)
+{
+    // Two headers, identical base fields, DIFFERENT auxpow payloads (one has
+    // none at all) -- must hash identically. This is the exact property the
+    // design-hazard comments in primitives/block.h and auxpow.h exist to
+    // protect; test it directly rather than just asserting it in a comment.
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+
+    CBlockHeader plain;
+    plain.nVersion = MakeAuxpowVersion(TEST_CHAIN_ID, 1);
+    plain.hashPrevBlock = uint256{"1111111111111111111111111111111111111111111111111111111111111111"};
+    plain.hashMerkleRoot = uint256{"2222222222222222222222222222222222222222222222222222222222222222"};
+    plain.nTime = 1700000000;
+    plain.nBits = EASY_BITS;
+    plain.nNonce = 42;
+    BOOST_CHECK(plain.auxpow == nullptr);
+    const uint256 hashNoProof = plain.GetHash();
+
+    CBlockHeader withProof = plain;
+    withProof.auxpow = std::make_shared<CAuxPow>(BuildValidAuxPow(hashNoProof, EASY_BITS, params));
+    BOOST_CHECK_EQUAL(withProof.GetHash().GetHex(), hashNoProof.GetHex());
+
+    // A second, DIFFERENT valid proof (different coinbase nonce -> different
+    // coinbase tx -> different merkle root inside the proof, but the proof
+    // is a completely separate object from the header) must produce the
+    // exact same header hash too -- the hash cannot depend on which proof,
+    // or whether any proof, is attached.
+    CAuxPow otherProof = BuildValidAuxPow(hashNoProof, EASY_BITS, params);
+    // Force it to be a genuinely different serialized object (different
+    // coinbase) while still committing to the same hashNoProof, by using a
+    // different chain ID in the same BuildValidAuxPow call is not possible
+    // (BuildValidAuxPow always uses TEST_CHAIN_ID internally for the trivial
+    // tree-size-1 case, which doesn't affect coinbase content) -- instead
+    // directly perturb the AuxPoW's own irrelevant-to-header-hash internals:
+    otherProof.parentBlock.nTime += 1; // changes the proof's own internals only
+    CBlockHeader withOtherProof = plain;
+    withOtherProof.auxpow = std::make_shared<CAuxPow>(otherProof);
+    BOOST_CHECK_EQUAL(withOtherProof.GetHash().GetHex(), hashNoProof.GetHex());
+}
+
+BOOST_AUTO_TEST_CASE(header_hash_changes_with_any_base_field)
+{
+    CBlockHeader base;
+    base.nVersion = 1;
+    base.hashPrevBlock = uint256{"1111111111111111111111111111111111111111111111111111111111111111"};
+    base.hashMerkleRoot = uint256{"2222222222222222222222222222222222222222222222222222222222222222"};
+    base.nTime = 1700000000;
+    base.nBits = 0x1d0fffff;
+    base.nNonce = 42;
+    const uint256 baseHash = base.GetHash();
+
+    auto mutated = [&](auto mutator) {
+        CBlockHeader h = base;
+        mutator(h);
+        return h.GetHash();
+    };
+    BOOST_CHECK(mutated([](CBlockHeader& h) { h.nVersion += 1; }) != baseHash);
+    BOOST_CHECK(mutated([](CBlockHeader& h) { h.hashPrevBlock = uint256{"3333333333333333333333333333333333333333333333333333333333333333"}; }) != baseHash);
+    BOOST_CHECK(mutated([](CBlockHeader& h) { h.hashMerkleRoot = uint256{"4444444444444444444444444444444444444444444444444444444444444444"}; }) != baseHash);
+    BOOST_CHECK(mutated([](CBlockHeader& h) { h.nTime += 1; }) != baseHash);
+    BOOST_CHECK(mutated([](CBlockHeader& h) { h.nBits += 1; }) != baseHash);
+    BOOST_CHECK(mutated([](CBlockHeader& h) { h.nNonce += 1; }) != baseHash);
+}
+
+BOOST_AUTO_TEST_CASE(real_existing_block_hash_unaffected_by_auxpow_addition)
+{
+    // A REAL header from BitAIcoin's actual live chain (tip at the time of
+    // this slice, fetched via `bitaicoin-cli getblockheader ... false` for
+    // the raw hex, and the verbose form for the known hash), height 225823 --
+    // well within the untouched 225430-225823 range this milestone commits
+    // to never altering. Reconstructs the header from its exact raw field
+    // values and confirms GetHash() still reproduces the exact known hash
+    // after this slice's changes to CBlockHeader -- a real, concrete proof
+    // that existing history's hashes are unaffected, not just an assertion.
+    CBlockHeader h;
+    h.nVersion = 536870912;
+    h.hashPrevBlock = uint256{"0000000365e377e69ba48e4d404467bf717eb92e5ee00abdadc09a072a817774"};
+    h.hashMerkleRoot = uint256{"ff7709be324cf2d64beae5eff8c667afa820c879d800a1e97a61e9a5ce2608e1"};
+    h.nTime = 1789815555;
+    h.nBits = 0x1d0fffff;
+    h.nNonce = 118543244;
+    BOOST_CHECK(h.auxpow == nullptr);
+    BOOST_CHECK(!h.IsAuxpow());
+
+    const uint256 expectedHash{"0000000ad1060dd6b63a31796c4d57977c7f009eb0229b32d0b15dd303ecff57"};
+    BOOST_CHECK_EQUAL(h.GetHash().GetHex(), expectedHash.GetHex());
+
+    // Also confirm the plain (unchanged) CBlockHeader serializer reproduces
+    // the real raw wire bytes exactly, byte for byte.
+    DataStream ss;
+    ss << h;
+    const std::string expectedHex =
+        "000000207477812a079ac0adbd0ae05e2eb97e71bf6744404d8ea49be677e36503000000"
+        "e10826cea5e9617ae9a100d879c820a8af67c6f8efe5ea4bd6f24c32be0977ff036bae6a"
+        "ffff0f1d8cd31007";
+    BOOST_CHECK_EQUAL(HexStr(ss), expectedHex);
+}
+
+BOOST_AUTO_TEST_CASE(serialize_roundtrip_no_auxpow_matches_plain_header_serialize)
+{
+    // A header WITHOUT the AUXPOW bit set, run through the NEW auxpow-aware
+    // serialize/deserialize functions, must produce byte-for-byte identical
+    // output to the plain (unchanged) CBlockHeader serializer -- this is the
+    // "old/pre-activation blocks remain byte-for-byte compatible" property,
+    // tested directly rather than just reasoned about.
+    CBlockHeader h;
+    h.nVersion = 536870912; // real, plain, non-AuxPoW version from the live chain
+    h.hashPrevBlock = uint256{"0000000365e377e69ba48e4d404467bf717eb92e5ee00abdadc09a072a817774"};
+    h.hashMerkleRoot = uint256{"ff7709be324cf2d64beae5eff8c667afa820c879d800a1e97a61e9a5ce2608e1"};
+    h.nTime = 1789815555;
+    h.nBits = 0x1d0fffff;
+    h.nNonce = 118543244;
+    BOOST_CHECK(!h.IsAuxpow());
+
+    DataStream plainStream;
+    plainStream << h; // plain CBlockHeader::SERIALIZE_METHODS, unchanged
+
+    DataStream auxpowAwareStream;
+    SerializeBlockHeaderWithAuxPow(h, auxpowAwareStream);
+
+    BOOST_CHECK_EQUAL(HexStr(plainStream), HexStr(auxpowAwareStream));
+
+    // Round trip through the new deserializer and back.
+    CBlockHeader h2;
+    UnserializeBlockHeaderWithAuxPow(h2, auxpowAwareStream);
+    BOOST_CHECK(h2.auxpow == nullptr);
+    BOOST_CHECK_EQUAL(h2.GetHash().GetHex(), h.GetHash().GetHex());
+
+    DataStream reserialized;
+    SerializeBlockHeaderWithAuxPow(h2, reserialized);
+    BOOST_CHECK_EQUAL(HexStr(reserialized), HexStr(plainStream));
+}
+
+BOOST_AUTO_TEST_CASE(serialize_roundtrip_with_auxpow_network_style)
+{
+    // "Network/P2P-style" round trip: DataStream is the same generic
+    // in-memory buffer type this codebase's own P2P message (de)serialization
+    // is built on.
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlockHeader h = MakeHeaderWithAuxpow(TEST_CHAIN_ID, params);
+    BOOST_CHECK(h.IsAuxpow());
+    BOOST_REQUIRE(h.auxpow != nullptr);
+
+    DataStream ss;
+    SerializeBlockHeaderWithAuxPow(h, ss);
+    const std::string originalHex = HexStr(ss); // captured before Unserialize consumes the read position
+
+    CBlockHeader h2;
+    UnserializeBlockHeaderWithAuxPow(h2, ss);
+    BOOST_CHECK(h2.IsAuxpow());
+    BOOST_REQUIRE(h2.auxpow != nullptr);
+    BOOST_CHECK_EQUAL(h2.GetHash().GetHex(), h.GetHash().GetHex());
+    BOOST_CHECK_EQUAL(h2.nVersion, h.nVersion);
+    BOOST_CHECK_EQUAL(h2.auxpow->nIndex, h.auxpow->nIndex);
+    BOOST_CHECK_EQUAL(h2.auxpow->nChainIndex, h.auxpow->nChainIndex);
+    BOOST_CHECK(h2.auxpow->parentBlock.GetHash() == h.auxpow->parentBlock.GetHash());
+
+    // Serialize->deserialize->serialize: byte-identical the second time.
+    DataStream ss2;
+    SerializeBlockHeaderWithAuxPow(h2, ss2);
+    BOOST_CHECK_EQUAL(HexStr(ss2), originalHex);
+}
+
+BOOST_AUTO_TEST_CASE(serialize_roundtrip_with_auxpow_disk_style)
+{
+    // "Disk-style" round trip: a REAL file on disk via AutoFile, not just an
+    // in-memory buffer -- exercises genuinely different I/O plumbing than
+    // the network-style test above, per explicit instruction to test both.
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlockHeader h = MakeHeaderWithAuxpow(TEST_CHAIN_ID, params);
+
+    const fs::path path{m_args.GetDataDirBase() / "test_auxpow_header.bin"};
+    {
+        AutoFile fileOut{fsbridge::fopen(path, "wb")};
+        SerializeBlockHeaderWithAuxPow(h, fileOut);
+        BOOST_CHECK_EQUAL(fileOut.fclose(), 0);
+    }
+
+    CBlockHeader h2;
+    {
+        AutoFile fileIn{fsbridge::fopen(path, "rb")};
+        UnserializeBlockHeaderWithAuxPow(h2, fileIn);
+        BOOST_CHECK_EQUAL(fileIn.fclose(), 0);
+    }
+
+    BOOST_CHECK(h2.IsAuxpow());
+    BOOST_REQUIRE(h2.auxpow != nullptr);
+    BOOST_CHECK_EQUAL(h2.GetHash().GetHex(), h.GetHash().GetHex());
+    BOOST_CHECK(h2.auxpow->parentBlock.GetHash() == h.auxpow->parentBlock.GetHash());
+    fs::remove(path);
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_bit_set_but_proof_missing_fails_to_serialize)
+{
+    // A header claiming AuxPoW (bit set) but with a null auxpow pointer must
+    // fail loudly on serialize, not silently write a truncated/malformed
+    // stream that a peer would then have to reject after the fact.
+    CBlockHeader h;
+    h.nVersion = MakeAuxpowVersion(TEST_CHAIN_ID, 1);
+    h.hashPrevBlock.SetNull();
+    h.hashMerkleRoot.SetNull();
+    h.nTime = 1;
+    h.nBits = EASY_BITS;
+    h.nNonce = 0;
+    BOOST_CHECK(h.auxpow == nullptr);
+
+    DataStream ss;
+    BOOST_CHECK_EXCEPTION(SerializeBlockHeaderWithAuxPow(h, ss), std::ios_base::failure,
+                           [](const std::ios_base::failure& e) { return std::string(e.what()).find("no auxpow proof attached") != std::string::npos; });
+}
+
+BOOST_AUTO_TEST_CASE(deserialize_rejects_truncated_auxpow_stream)
+{
+    // AUXPOW bit set in the version, but the stream ends right after the six
+    // base fields with no auxpow payload at all -- must fail cleanly (throw),
+    // not read out-of-bounds or default-construct a bogus "valid" proof.
+    DataStream ss;
+    int32_t version = MakeAuxpowVersion(TEST_CHAIN_ID, 1);
+    uint256 prev; prev.SetNull();
+    uint256 merkle; merkle.SetNull();
+    uint32_t time = 1, bits = EASY_BITS, nonce = 0;
+    ss << version << prev << merkle << time << bits << nonce; // no auxpow payload follows
+
+    CBlockHeader h2;
+    BOOST_CHECK_THROW(UnserializeBlockHeaderWithAuxPow(h2, ss), std::ios_base::failure);
+}
+
+BOOST_AUTO_TEST_CASE(deserialize_rejects_oversized_merkle_branch_claim)
+{
+    // Malformed-data rejection: a coinbase transaction whose merkle branch
+    // vector claims an implausible length (well past MAX_MERKLE_BRANCH_LENGTH)
+    // must be rejected at deserialization, before any hashing is attempted.
+    // Hand-builds the stream rather than going through CAuxPow's normal
+    // serializer, since a normal serializer would never produce this.
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    CBlockHeader h = MakeHeaderWithAuxpow(TEST_CHAIN_ID, params);
+    BOOST_REQUIRE(h.auxpow != nullptr);
+    h.auxpow->vChainMerkleBranch.assign(MAX_MERKLE_BRANCH_LENGTH + 1, uint256{});
+
+    DataStream ss;
+    // Can't use SerializeBlockHeaderWithAuxPow directly since CAuxPow's own
+    // SERIALIZE_METHODS has no length cap of its own (the cap is enforced by
+    // the caller, UnserializeBlockHeaderWithAuxPow) -- serialize the base
+    // fields plus the (oversized) auxpow manually to construct the exact
+    // malformed-on-the-wire scenario being tested.
+    ss << h.nVersion << h.hashPrevBlock << h.hashMerkleRoot << h.nTime << h.nBits << h.nNonce;
+    ss << *h.auxpow;
+
+    CBlockHeader h2;
+    BOOST_CHECK_EXCEPTION(UnserializeBlockHeaderWithAuxPow(h2, ss), std::ios_base::failure,
+                           [](const std::ios_base::failure& e) { return std::string(e.what()).find("implausibly long") != std::string::npos; });
+}
+
+BOOST_AUTO_TEST_CASE(direct_mining_header_serializes_without_auxpow_both_sides_of_activation)
+{
+    // A direct-mined (non-AuxPoW) header serializes/deserializes identically
+    // via the new auxpow-aware functions regardless of height relative to
+    // 227808 -- the serialization layer itself is height-agnostic (height-
+    // gating is CheckAuxPowRules()'s job, tested separately above); this
+    // confirms the wire format doesn't accidentally require or assume a
+    // height parameter it was never given.
+    CBlockHeader h;
+    h.nVersion = 536870912;
+    h.hashPrevBlock.SetNull();
+    h.hashMerkleRoot.SetNull();
+    h.nTime = 1;
+    h.nBits = 0x1d0fffff;
+    h.nNonce = 0;
+    BOOST_CHECK(!h.IsAuxpow());
+
+    DataStream ss;
+    SerializeBlockHeaderWithAuxPow(h, ss);
+    CBlockHeader h2;
+    UnserializeBlockHeaderWithAuxPow(h2, ss);
+    BOOST_CHECK(h2.auxpow == nullptr);
+    BOOST_CHECK_EQUAL(h2.GetHash().GetHex(), h.GetHash().GetHex());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

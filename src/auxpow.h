@@ -34,56 +34,20 @@
 #include <uint256.h>
 
 #include <cstdint>
+#include <ios>
+#include <memory>
 #include <vector>
 
 class BlockValidationState;
 
-/**
- * Height-gated version-bit convention for AuxPoW-flagged blocks, matching
- * Namecoin's original encoding (also used by Syscoin, Dogecoin, Elastos and
- * others):
- *
- *   nVersion bit 8 (0x100)      -- VERSION_AUXPOW: this header carries a
- *                                  CAuxPow structure and MUST be validated
- *                                  via merge-mining, not via its own hash.
- *   nVersion bits 16-31         -- the merge-mined chain's ID (BitAIcoin's is
- *                                  16969 / 0x4249, "BI" -- see
- *                                  docs/AUXPOW_MILESTONE.md sec.5/B). A block
- *                                  whose top 16 bits don't match BitAIcoin's
- *                                  chain ID is not a BitAIcoin AuxPoW block,
- *                                  even if the AUXPOW bit is set (this is the
- *                                  chain-ID collision defense).
- *
- * A block below the AuxPoW activation height with the AUXPOW bit set is
- * invalid outright (the bit has no meaning pre-activation and must not be
- * silently ignored). A block at/after activation height WITHOUT the AUXPOW
- * bit set is still valid -- own-chain SHA256d mining and merge-mining both
- * remain accepted after activation, exactly as in every real deployment of
- * this design; AuxPoW is an additional accepted proof format, not a
- * replacement that forbids direct mining.
- */
-static constexpr int32_t VERSION_AUXPOW = (1 << 8);
-static constexpr int32_t VERSION_CHAIN_ID_SHIFT = 16;
-
-inline int32_t GetBaseVersion(int32_t nVersion)
-{
-    return nVersion % VERSION_AUXPOW;
-}
-
-inline int32_t GetChainId(int32_t nVersion)
-{
-    return nVersion >> VERSION_CHAIN_ID_SHIFT;
-}
-
-inline bool IsAuxpowVersion(int32_t nVersion)
-{
-    return (nVersion & VERSION_AUXPOW) != 0;
-}
-
-inline int32_t MakeAuxpowVersion(int32_t nChainId, int32_t nBaseVersion)
-{
-    return (nChainId << VERSION_CHAIN_ID_SHIFT) | VERSION_AUXPOW | nBaseVersion;
-}
+// NOTE: the version-bit helpers (VERSION_AUXPOW, GetBaseVersion, GetChainId,
+// IsAuxpowVersion, MakeAuxpowVersion) used to be defined here. They now live
+// in primitives/block.h instead (included above), specifically so that BOTH
+// this file and CBlockHeader::IsAuxpow() can use the exact same single
+// definition without a circular include between block.h and this file (this
+// file needs the complete CBlockHeader type for CAuxPow::parentBlock;
+// block.h cannot include this file in return). Moved, not duplicated --
+// removing them from here was deliberate, not an oversight.
 
 /**
  * The four-byte magic that must appear in the parent-chain coinbase
@@ -155,7 +119,23 @@ public:
 
     SERIALIZE_METHODS(CAuxPow, obj)
     {
-        READWRITE(obj.coinbaseTx);
+        // TX_NO_WITNESS, deliberately: a real, substantive bug caught by
+        // actually compiling a stream round-trip this pass (not present in
+        // the earlier standalone-construction tests, which never actually
+        // serialized a CAuxPow over a stream) -- CTransactionRef fields
+        // require an explicit TransactionSerParams wrapper on a plain
+        // stream (this codebase's own TX_WITH_WITNESS/TX_NO_WITNESS idiom,
+        // see primitives/transaction.h), or the code fails to compile at
+        // all for any Stream lacking an attached TransactionSerParams. This
+        // is also the semantically CORRECT choice, not just the one that
+        // compiles: the coinbase's merkle-branch inclusion check
+        // (CAuxPow::Check(), step 2) uses coinbaseTx->GetHash() -- the TXID,
+        // which excludes witness data by definition -- matching how
+        // parentBlock.hashMerkleRoot itself is always a TXID-based merkle
+        // root. Witness data has no bearing on this proof and including it
+        // would only add unnecessary bytes, so TX_NO_WITNESS is the
+        // intentional, permanent choice here, not a placeholder.
+        READWRITE(TX_NO_WITNESS(obj.coinbaseTx));
         READWRITE(obj.vMerkleBranch);
         READWRITE(obj.nIndex);
         READWRITE(obj.vChainMerkleBranch);
@@ -272,5 +252,69 @@ public:
 bool CheckAuxPowRules(int32_t nVersion, int nHeight, const uint256& hashHeader, uint32_t nBits,
                        const CAuxPow* auxpow, int32_t expectedChainId, int activationHeight,
                        const Consensus::Params& params, BlockValidationState& state);
+
+/**
+ * A merkle branch with more than this many levels is malformed on its face
+ * (2^32 leaves would need at most 32 levels; anything more cannot correspond
+ * to any real transaction position) -- rejected before any hashing work is
+ * done with it, both for CAuxPow::Check()'s own chain-merkle-branch check
+ * (already enforced there) and for the coinbase merkle branch during
+ * deserialization (enforced here, at the wire-format boundary, per explicit
+ * instruction to "preserve unknown/malformed-data rejection and size
+ * limits"). This is IN ADDITION to, not instead of, the generic compact-size
+ * length-prefix sanity limit (`MAX_SIZE`) that this codebase's ordinary
+ * `std::vector<uint256>` deserialization already enforces on any serialized
+ * vector regardless of type.
+ */
+static constexpr size_t MAX_MERKLE_BRANCH_LENGTH = 32;
+
+/**
+ * Auxpow-aware header (de)serialization, kept EXPLICITLY SEPARATE from
+ * CBlockHeader's own SERIALIZE_METHODS (see the design-hazard comment on
+ * CBlockHeader::auxpow in primitives/block.h) -- mirrors this codebase's own
+ * existing SerializeTransaction/UnserializeTransaction free-function split
+ * for txid-vs-wtxid concerns (src/primitives/transaction.h), not invented
+ * from scratch. Works for ANY conforming Stream (network `DataStream`,
+ * disk-backed `AutoFile`, etc.) since it is templated exactly like that
+ * existing precedent -- there is no separate "disk format" vs "network
+ * format" at this layer, only different Stream backends given to the same
+ * function, which is the design real Bitcoin Core already uses elsewhere.
+ *
+ * Byte-for-byte compatible with plain CBlockHeader serialization for every
+ * pre-activation / non-AuxPoW header: the six base fields are written in the
+ * exact same order via the exact same primitive Serialize calls CBlockHeader
+ * itself would use, and the auxpow payload is only ever touched when
+ * `IsAuxpowVersion(nVersion)` is true.
+ */
+template <typename Stream>
+void SerializeBlockHeaderWithAuxPow(const CBlockHeader& header, Stream& s)
+{
+    s << header.nVersion << header.hashPrevBlock << header.hashMerkleRoot
+      << header.nTime << header.nBits << header.nNonce;
+    if (header.IsAuxpow()) {
+        if (!header.auxpow) {
+            throw std::ios_base::failure("SerializeBlockHeaderWithAuxPow: AUXPOW version bit set but no auxpow proof attached");
+        }
+        s << *header.auxpow;
+    }
+}
+
+template <typename Stream>
+void UnserializeBlockHeaderWithAuxPow(CBlockHeader& header, Stream& s)
+{
+    s >> header.nVersion >> header.hashPrevBlock >> header.hashMerkleRoot
+      >> header.nTime >> header.nBits >> header.nNonce;
+    if (header.IsAuxpow()) {
+        auto proof = std::make_shared<CAuxPow>();
+        s >> *proof;
+        if (proof->vMerkleBranch.size() > MAX_MERKLE_BRANCH_LENGTH ||
+            proof->vChainMerkleBranch.size() > MAX_MERKLE_BRANCH_LENGTH) {
+            throw std::ios_base::failure("UnserializeBlockHeaderWithAuxPow: merkle branch implausibly long, rejected");
+        }
+        header.auxpow = std::move(proof);
+    } else {
+        header.auxpow.reset();
+    }
+}
 
 #endif // BITCOIN_AUXPOW_H
