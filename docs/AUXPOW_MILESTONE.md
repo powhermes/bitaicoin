@@ -120,6 +120,27 @@ untested block of code — starting with the AuxPoW header/proof serialization a
 since every other piece (the RPCs, the tests, the multi-node upgrade) depends on that being correct
 first.
 
+**Status update (2026-09-23, commit `800c533c3a`): the serialization/validation core is done.**
+`src/auxpow.h`/`src/auxpow.cpp` implement `CAuxPow` (parent header + coinbase tx + both merkle
+branches), the version-bit helpers, `CheckMerkleBranch()`, the Namecoin-compatible
+index-grinding-resistant `GetExpectedMerkleTreeIndex()`, and `CAuxPow::Check()` covering every
+rejection case listed in sec.4/5 above (parent PoW vs. the auxiliary chain's own target -- not the
+parent chain's, a real bug caught and fixed before any test was written around the wrong version --
+parent-not-itself-AuxPoW, coinbase merkle inclusion, exactly-one-tag ambiguity defense, chain-merkle
+commitment, index-grinding defense). `src/test/auxpow_tests.cpp` has 9 real end-to-end tests, each
+building an actual fake parent block and running it through `Check()`; all 9 pass, and the full
+existing 749-case `test_bitcoin` suite still passes with zero regressions (both verified by an actual
+`cmake --build` + test run this session, not assumed).
+
+**Explicitly NOT yet done, next slice:** wiring this into `CheckProofOfWorkImpl`,
+`ContextualCheckBlockHeader`, net_processing's header/block relay, and GBT/mining. Splicing new
+block-acceptance-path serialization into the live consensus code is being kept as its own separate,
+reviewed change rather than folded into the same commit as the core logic -- consistent with "built
+and tested incrementally" above. The DAA branch (ASERT, sec.3/A) is validated as a standalone module
+(`contrib/asert_reference.py`) but likewise not yet wired into `pow.cpp`'s real `GetNextWorkRequired`
+dispatch. New RPCs, the obsolete-node fork test (protocol frozen in sec.C), and the stabilization
+checkpoint (sec.D) all remain after that wiring lands.
+
 ## Addendum (2026-09-23): frozen details, before the first consensus commit
 
 Adds precision on top of §1-5 above per explicit follow-up instruction. Nothing in §1-5 above is
