@@ -8,6 +8,7 @@
 #include <auxpow.h>
 #include <chain.h>
 #include <consensus/params.h>
+#include <consensus/validation.h>
 #include <crypto/hex_base.h>
 #include <dbwrapper.h>
 #include <flatfile.h>
@@ -143,11 +144,25 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 pindexNew->nTime          = diskindex.nTime;
                 pindexNew->nBits          = diskindex.nBits;
                 pindexNew->nNonce         = diskindex.nNonce;
+                pindexNew->auxpow         = diskindex.auxpow; // BitAIcoin AuxPoW addition
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nTx            = diskindex.nTx;
 
-                if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, consensusParams)) {
-                    LogError("%s: CheckProofOfWork failed: %s\n", __func__, pindexNew->ToString());
+                // AuxPoW audit finding (item 3): this used to call
+                // CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, ...)
+                // directly -- a header's own hash passed straight to the generic,
+                // AuxPoW-unaware check. For a real AuxPoW block, the header's own
+                // hash is NOT required to satisfy nBits (the parent block's hash
+                // is, via CAuxPow::Check()) -- the old call would have wrongly
+                // rejected every valid AuxPoW block on every node restart/reindex.
+                // Replaced with the header-aware dispatcher (src/auxpow.h), which
+                // is behavior-identical to the old call for every block that
+                // exists today or that exists before AuxPoW activation (no header
+                // has the AUXPOW bit set until then), and correctly defers to
+                // CAuxPow::Check() for one that does.
+                BlockValidationState state;
+                if (!CheckBitAIProofOfWork(pindexNew->GetBlockHeader(), consensusParams, state)) {
+                    LogError("%s: CheckBitAIProofOfWork failed: %s (%s)\n", __func__, pindexNew->ToString(), state.ToString());
                     return false;
                 }
 
@@ -1054,9 +1069,15 @@ bool BlockManager::ReadBlock(CBlock& block, const FlatFilePos& pos, const std::o
 
     const auto block_hash{block.GetHash()};
 
-    // Check the header
-    if (!CheckProofOfWork(block_hash, block.nBits, GetConsensus())) {
-        LogError("Errors in block header at %s while reading block", pos.ToString());
+    // Check the header. AuxPoW audit finding (item 3): used to call
+    // CheckProofOfWork(block_hash, ...) directly on the just-deserialized
+    // block's own hash -- for a real AuxPoW block (whose auxpow field IS
+    // already correctly populated by the AuxPowBlockWithWitness read just
+    // above), that own hash is not required to satisfy nBits, only the
+    // parent's is. Replaced with the dispatcher (src/auxpow.h).
+    BlockValidationState pow_state;
+    if (!CheckBitAIProofOfWork(block, GetConsensus(), pow_state)) {
+        LogError("Errors in block header at %s while reading block (%s)", pos.ToString(), pow_state.ToString());
         return false;
     }
 

@@ -4448,8 +4448,14 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                 pindex = m_chainman.ActiveChain().Next(pindex);
         }
 
-        // we must use CBlocks, as CBlockHeaders won't include the 0x00 nTx count at the end
-        std::vector<CBlock> vHeaders;
+        // AuxPoW addition: this used to require CBlock (not CBlockHeader) purely
+        // to get the trailing 0x00 tx-count byte for free from CBlock's own
+        // (empty-vtx) generic serialization -- see the old comment this replaces.
+        // AuxPowHeadersForAnnounce() (src/auxpow.h) now writes that same trailing
+        // byte explicitly, so a plain CBlockHeader vector suffices, AND each
+        // header's auxpow (from pindex->GetBlockHeader(), itself now auxpow-aware
+        // -- see CBlockIndex::auxpow in chain.h) is correctly carried onto the wire.
+        std::vector<CBlockHeader> vHeaders;
         int nLimit = m_opts.max_headers_result;
         LogDebug(BCLog::NET, "getheaders %d to %s from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), pfrom.GetId());
         for (; pindex; pindex = m_chainman.ActiveChain().Next(pindex))
@@ -4471,7 +4477,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         // will re-announce the new block via headers (or compact blocks again)
         // in the SendMessages logic.
         nodestate->pindexBestHeaderSent = pindex ? pindex : m_chainman.ActiveChain().Tip();
-        MakeAndPushMessage(pfrom, NetMsgType::HEADERS, TX_WITH_WITNESS(vHeaders));
+        MakeAndPushMessage(pfrom, NetMsgType::HEADERS, AuxPowHeadersForAnnounce(vHeaders));
         return;
     }
 
@@ -4836,8 +4842,17 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
         headers.resize(nCount);
         for (unsigned int n = 0; n < nCount; n++) {
-            vRecv >> headers[n];
-            ReadCompactSize(vRecv); // ignore tx count; assume it is 0.
+            // AuxPoW addition: was a plain `vRecv >> headers[n];` -- deserializes
+            // the auxpow payload too when the header's version bit is set (see
+            // src/auxpow.h). The DoS-relevant nCount/max_headers_result check
+            // above already ran before this loop allocates/parses anything, so
+            // this per-element swap doesn't weaken it. Malformed/truncated
+            // headers (including an oversized claimed merkle branch inside an
+            // attached proof) throw std::ios_base::failure here, exactly like
+            // any other deserialize error already handled by this message's
+            // caller.
+            UnserializeBlockHeaderWithAuxPow(headers[n], vRecv);
+            ReadCompactSize(vRecv); // ignore tx count; assume it is 0. Historical semantics, preserved exactly.
         }
 
         ProcessHeadersMessage(pfrom, peer, std::move(headers), /*via_compact_block=*/false);
@@ -5843,7 +5858,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
             // blocks, or if the peer doesn't want headers, just
             // add all to the inv queue.
             LOCK(peer.m_block_inv_mutex);
-            std::vector<CBlock> vHeaders;
+            std::vector<CBlockHeader> vHeaders; // AuxPoW addition: see the getheaders send site above for why CBlockHeader now suffices
             bool fRevertToInv = ((!peer.m_prefers_headers &&
                                  (!state.m_requested_hb_cmpctblocks || peer.m_blocks_for_headers_relay.size() > 1)) ||
                                  peer.m_blocks_for_headers_relay.size() > MAX_BLOCKS_TO_ANNOUNCE);
@@ -5931,7 +5946,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                         LogDebug(BCLog::NET, "%s: sending header %s to peer=%d\n", __func__,
                                 vHeaders.front().GetHash().ToString(), node.GetId());
                     }
-                    MakeAndPushMessage(node, NetMsgType::HEADERS, TX_WITH_WITNESS(vHeaders));
+                    MakeAndPushMessage(node, NetMsgType::HEADERS, AuxPowHeadersForAnnounce(vHeaders));
                     state.pindexBestHeaderSent = pBestIndex;
                 } else
                     fRevertToInv = true;

@@ -346,10 +346,128 @@ touching `net_processing.cpp`, `node/blockstorage.cpp`, and `src/blockencodings.
 compiled and linked without error); the full test suite (**772 cases, zero regressions**); the real
 two-process regtest relay test described above.
 
-**Explicitly still NOT done, next slices (unchanged from before except as noted above):** splicing
-`CheckAuxPowRules()` into the real `ContextualCheckBlockHeader()` call path (mechanical now that
-storage exists, but touches a function with many existing call sites and deserves its own review,
-per instruction to keep this separate); `CheckProofOfWorkImpl`. The DAA branch (ASERT,
+**Status update (2026-09-23, HEADERS transport + PoW dispatcher slice): DONE, including the real
+AuxPoW transport+acceptance test, kept BEFORE splicing `CheckAuxPowRules()` per explicit instruction.**
+
+**1. HEADERS-message AuxPoW transport -- fixed on both sides, a real deeper gap found and fixed too.**
+Attempting the fix surfaced something the earlier audit didn't: `CBlockIndex` (the actual data
+HEADERS relay reads from, via `CBlockIndex::GetBlockHeader()`) had **no `auxpow` field at all** --
+meaning even a perfect wire-format fix would have had nothing to serialize, since the proof was never
+captured anywhere reachable once a block finished being processed as a fresh `CBlock`. Fixed properly,
+not worked around:
+  - Added `CBlockIndex::auxpow` (`shared_ptr<const CAuxPow>`, same ownership semantics as
+    `CBlockHeader::auxpow`), populated in `CBlockIndex(const CBlockHeader&)` (the real capture point --
+    every block, including ones just received over P2P, passes through this constructor when first
+    indexed) and returned by `GetBlockHeader()`.
+  - Persisted it in `CDiskBlockIndex`'s own serialization too, so it survives a restart/reindex --
+    without this, a node's own index would silently forget an already-accepted AuxPoW block's proof
+    the moment it restarted. **A real bug caught by the compiler, not just reasoned about:** an initial
+    version used a plain runtime `if (ser_action.ForRead())` inside the shared `SerializationOps` body
+    to decide whether to mutate `obj.auxpow` -- this fails to COMPILE for the write-side instantiation
+    (where `obj` is `const CDiskBlockIndex&`), because both branches of a runtime `if` are compiled
+    against the same `obj`, unlike `if constexpr`. Fixed using `SER_READ`/`SER_WRITE` (this codebase's
+    own real precedent for exactly this, e.g. `merkleblock.h`'s `CPartialMerkleTree`), which generate
+    genuinely separate, correctly-const-qualified lambdas per action.
+  - Fixed the actual wire format: outgoing HEADERS (2 real send sites) now use
+    `AuxPowHeadersForAnnounce()` (`src/auxpow.h`), a small explicit wrapper that writes the historical
+    trailing compact-size-0 "as if a CBlock with empty vtx" byte EXACTLY as before, per header, so
+    `std::vector<CBlockHeader>` could replace the old `std::vector<CBlock>` trick outright (the old
+    code's own comment -- "we must use CBlocks, as CBlockHeaders won't include the 0x00 nTx count at
+    the end" -- is now obsolete and was updated in place, not left stale). Incoming HEADERS' real
+    per-element receive loop had its DoS-relevant `max_headers_result`/`Misbehaving()` check left
+    completely untouched, with only the one inner deserialization call swapped to
+    `UnserializeBlockHeaderWithAuxPow`.
+  - `LoadBlockIndexGuts` (`node/blockstorage.cpp`) updated to copy `diskindex.auxpow` into the
+    reconstructed in-memory index on load.
+  - 3 new tests: a mixed vector (plain, AuxPoW, plain) round-trips correctly; an all-plain vector
+    produces byte-for-byte identical output to the old CBlock-wrapping mechanism; a truncated stream
+    is rejected cleanly.
+
+**2/3. `CheckBitAIProofOfWork` dispatcher, and the real call-site audit that motivated it.** Built the
+single header-level PoW decision point exactly as specified -- `CheckBitAIProofOfWork(const
+CBlockHeader&, const Consensus::Params&, BlockValidationState&)` in `src/auxpow.h`/`.cpp` -- with NO
+height parameter (that stays `CheckAuxPowRules()`'s job, not merged in). Direct blocks: unchanged
+`CheckProofOfWork` on the header's own hash. AuxPoW blocks: the header's own hash is explicitly NOT
+checked; a missing proof fails outright; the header's own `nVersion` is confirmed to actually claim
+`BITAI_AUXPOW_CHAIN_ID` (16969, now a real named constant, promoted from a proposal-only value) --
+**a real gap caught before it was ever tested, not by a failing test:** an early version passed the
+constant into `CAuxPow::Check()`'s internal math without ever confirming the header's own declared
+identity matched it, which would have accepted a proof mathematically valid against the hardcoded
+value while the header claimed to be something else entirely; then `CAuxPow::Check()` runs.
+
+Audited every real call site (grep + full-context reading) where a header's own hash was passed
+directly to `CheckProofOfWork`, replacing exactly the ones that needed it and leaving the ones that
+correctly don't:
+  - **Fixed:** `CheckBlockHeader` (`validation.cpp`) -- the real function called BEFORE
+    `ContextualCheckBlockHeader()` in the actual pipeline; left as plain `CheckProofOfWork`, this would
+    have rejected every valid AuxPoW header before `CheckAuxPowRules()` (not yet reached) ever got a
+    say, regardless of what it would have decided.
+  - **Fixed:** `HasValidProofOfWork` (`validation.cpp`) -- net_processing's bulk pre-check on a whole
+    received HEADERS batch; same hazard, same fix, contract (bool-only, no exposed per-header reason)
+    unchanged.
+  - **Fixed:** `BlockManager::ReadBlock` (`node/blockstorage.cpp`) -- checked a freshly-deserialized
+    block's own hash right after the already-fixed `AuxPowBlockWithWitness` read; same hazard.
+  - **Fixed:** `LoadBlockIndexGuts` (`node/blockstorage.cpp`) -- see item 1 above; this is also where
+    the audit's dispatcher fix and the index-storage fix meet.
+  - **Correctly left unchanged:** `CAuxPow::Check()`'s own internal `CheckProofOfWork(parentBlock.
+    GetHash(), ...)` (that's the PARENT's hash, the intended real check, not a bug); the dispatcher's
+    own direct-block branch (same reason); the brute-force nonce loop in `rpc/mining.cpp` (mining code
+    that, today, can only ever produce non-AuxPoW blocks -- not a validation call site).
+  - 5 new tests: direct blocks match ordinary `CheckProofOfWork` exactly (both accept and reject
+    cases); an AuxPoW block with an "impossible" own-hash but a valid proof is correctly accepted
+    (proving the own-hash truly isn't checked); missing proof and wrong-chain-id both rejected with
+    the right reasons.
+
+**4/5. The real AuxPoW transport + acceptance test -- built and passing, before splicing
+`CheckAuxPowRules()`, per explicit instruction.** Used this codebase's own real test precedent for
+constructing valid test blocks (`validation_block_tests.cpp`'s `MinerTestingSetup` pattern: a real
+`BlockAssembler` template, real coinbase/height wiring, real `GenerateCoinbaseCommitment` for
+regtest's active SegWit, real merkle root) rather than inventing a parallel mechanism. The test: mines
+3 real direct blocks to establish a small real chain and a real, DAA-computed `nBits`; builds a
+competing AuxPoW-flagged candidate at the same height using that SAME real required `nBits` (not a
+test-only override); builds a genuinely valid `CAuxPow` proof against it; **transports** it through the
+exact real wire functions now live in net_processing.cpp/blockstorage.cpp
+(`SerializeBlockWithAuxPow`/`UnserializeBlockWithAuxPow` -- not parallel copies); and hands the
+post-transport block to the REAL acceptance pipeline (`ChainstateManager::ProcessNewBlockHeaders` then
+`ProcessNewBlock` -- the same functions net_processing.cpp itself calls). Confirms: header state valid,
+block accepted, and the resulting real `CBlockIndex` entry has its `auxpow` populated and its version
+correctly flagged -- proving the whole pipeline including the `CBlockIndex` capture point from item 1,
+not just isolated function calls.
+
+**A real, previously-unknown bug was caught by this test failing on its first run, not found by
+inspection:** an early version built the AuxPoW candidate's version via `MakeAuxpowVersion
+(BITAI_AUXPOW_CHAIN_ID, auxBlock->nVersion)` -- passing the template's WHOLE pre-existing version
+(which already carries real BIP9 signaling bits, e.g. shaped like `0x20000000`) as the "base version"
+argument. Since BIP9's signaling bits (top 3 bits, 29-31) and AuxPoW's chain-ID field (bits 16-31)
+**genuinely overlap** in this encoding, OR-ing the whole template version in silently corrupted the
+encoded chain ID (16969 became 25161), and the dispatcher correctly rejected it. **This is a real,
+open design question surfaced by a test failure, not resolved here:** a real miner constructing an
+AuxPoW candidate cannot naively combine an unmodified BIP9-signaling template version with the
+chain-ID-in-version-bits scheme without one clobbering the other. Worth a dedicated look whenever
+GBT/AuxPoW mining is actually built (item scoped for later, per instruction to keep
+`createauxblock`/`submitauxblock` a separate commit). Fixed in the test itself by using a plain, small
+base version, matching every other test's usage in this file -- honest about being a test-scope fix,
+not a resolution of the underlying question.
+
+**Honest scope note on "transport":** this exercises the real validation/serialization code in a
+single test process via direct `ChainstateManager` calls, not two literal OS processes over raw P2P
+sockets -- explicitly endorsed as acceptable/preferable per instruction ("a deterministic
+functional-test fixture ... is acceptable and preferable to waiting for the mining RPC
+implementation"). It proves the exact same functions net_processing.cpp calls preserve and correctly
+validate a real proof end to end; a literal two-process raw-socket run would exercise the identical
+validation code path, differing only in the socket-framing layer, which carries no AuxPoW-specific
+risk of its own.
+
+**Verified for real:** full rebuild of `bitcoind`/`bitcoin-cli`/`test_bitcoin` from clean (multiple
+passes, including after catching and fixing 2 real bugs -- the `SER_READ`/`SER_WRITE` compile error
+and the `MakeAuxpowVersion` encoding bug); the full test suite (**780 cases, zero regressions**); TWO
+real two-process regtest tests, one of which included a full node restart (mining 20 blocks on node A,
+confirming relay to node B, restarting node A entirely -- exercising the new `CDiskBlockIndex`
+persistence and `LoadBlockIndexGuts`'s new dispatcher call for real -- and confirming both nodes still
+match tip hash exactly after reload).
+
+**Explicitly still NOT done, next slice (per instruction, now the very next step):** splicing
+`CheckAuxPowRules()` into the real `ContextualCheckBlockHeader()` call path. The DAA branch (ASERT,
 sec.3/A) is validated as a standalone module (`contrib/asert_reference.py`, now with a proven
 arithmetic bound and Decred differential vectors -- see the Addendum below) but likewise not yet wired
 into `pow.cpp`'s real `GetNextWorkRequired` dispatch. New RPCs, the obsolete-node fork test (protocol

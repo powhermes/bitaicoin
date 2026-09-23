@@ -7,6 +7,7 @@
 #define BITCOIN_CHAIN_H
 
 #include <arith_uint256.h>
+#include <auxpow.h>
 #include <consensus/params.h>
 #include <flatfile.h>
 #include <kernel/cs_main.h>
@@ -143,6 +144,23 @@ public:
     uint32_t nBits{0};
     uint32_t nNonce{0};
 
+    // --- BitAIcoin AuxPoW addition (not stock Bitcoin Core) ---
+    // Mirrors CBlockHeader::auxpow exactly (same shared_ptr<const CAuxPow>
+    // ownership semantics, same rationale -- see primitives/block.h). This
+    // is the actual "source of truth" HEADERS-message relay reads from
+    // (via GetBlockHeader() below), NOT the header of whatever CBlock
+    // happens to be in memory at relay time -- without this field, a
+    // node's own persistent chain index would have nowhere to keep an
+    // AuxPoW proof once the original CBlock is no longer needed/in memory,
+    // making HEADERS-relay of a real proof structurally impossible no
+    // matter how the wire serialization itself was fixed. Populated once,
+    // in the CBlockIndex(const CBlockHeader&) constructor below, from
+    // whatever real CBlock/CBlockHeader is being indexed for the first
+    // time; persisted to disk by CDiskBlockIndex (also below) so it
+    // survives a restart/reindex.
+    std::shared_ptr<const CAuxPow> auxpow;
+    // --- end BitAIcoin AuxPoW addition ---
+
     //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
     //! Initialized to SEQ_ID_INIT_FROM_DISK{1} when loading blocks from disk, except for blocks
     //! belonging to the best chain which overwrite it to SEQ_ID_BEST_CHAIN_FROM_DISK{0}.
@@ -156,7 +174,8 @@ public:
           hashMerkleRoot{block.hashMerkleRoot},
           nTime{block.nTime},
           nBits{block.nBits},
-          nNonce{block.nNonce}
+          nNonce{block.nNonce},
+          auxpow{block.auxpow} // BitAIcoin AuxPoW addition -- the real capture point
     {
     }
 
@@ -192,6 +211,7 @@ public:
         block.nTime = nTime;
         block.nBits = nBits;
         block.nNonce = nNonce;
+        block.auxpow = auxpow; // BitAIcoin AuxPoW addition
         return block;
     }
 
@@ -357,6 +377,42 @@ public:
         READWRITE(obj.nTime);
         READWRITE(obj.nBits);
         READWRITE(obj.nNonce);
+
+        // BitAIcoin AuxPoW addition: persist the proof so it survives a
+        // restart/reindex -- see the field comment on CBlockIndex::auxpow
+        // above. Logic mirrors UnserializeBlockHeaderWithAuxPow/
+        // SerializeBlockHeaderWithAuxPow (src/auxpow.h), but MUST use
+        // SER_READ/SER_WRITE here rather than a plain runtime
+        // `if (ser_action.ForRead())` -- a real bug caught by the compiler,
+        // not just reasoned about: SerializationOps is ONE templated
+        // function body shared by both the read and write instantiations,
+        // so with a plain runtime `if`, the mutating `obj.auxpow = ...`
+        // statement is still COMPILED (even though never executed at
+        // runtime) against the write instantiation's `obj`, which is
+        // `const CDiskBlockIndex&` there -- a compile error. SER_READ's
+        // lambda parameter is explicitly `std::remove_const_t<Type>&`,
+        // giving the read branch its own genuinely-non-const `obj` in a
+        // separate lambda, exactly like this codebase's own real precedent
+        // (merkleblock.h's CPartialMerkleTree::SERIALIZE_METHODS).
+        if (IsAuxpowVersion(obj.nVersion)) {
+            SER_READ(obj, {
+                auto proof = std::make_shared<CAuxPow>();
+                s >> *proof;
+                if (proof->vMerkleBranch.size() > MAX_MERKLE_BRANCH_LENGTH ||
+                    proof->vChainMerkleBranch.size() > MAX_MERKLE_BRANCH_LENGTH) {
+                    throw std::ios_base::failure("CDiskBlockIndex: merkle branch implausibly long, rejected");
+                }
+                obj.auxpow = std::move(proof);
+            });
+            SER_WRITE(obj, {
+                if (!obj.auxpow) {
+                    throw std::ios_base::failure("CDiskBlockIndex: AUXPOW version bit set but no auxpow proof to persist");
+                }
+                s << *obj.auxpow;
+            });
+        } else {
+            SER_READ(obj, obj.auxpow.reset());
+        }
     }
 
     uint256 ConstructBlockHash() const

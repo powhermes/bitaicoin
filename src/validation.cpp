@@ -8,6 +8,7 @@
 #include <validation.h>
 
 #include <arith_uint256.h>
+#include <auxpow.h>
 #include <chain.h>
 #include <checkqueue.h>
 #include <clientversion.h>
@@ -3905,9 +3906,18 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
 
 static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true)
 {
-    // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(block.GetHash(), block.nBits, consensusParams))
-        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
+    // AuxPoW audit finding (item 3): this is called BEFORE
+    // ContextualCheckBlockHeader() in the real validation pipeline, so a
+    // plain CheckProofOfWork(block.GetHash(), ...) call here would reject
+    // every valid AuxPoW header before CheckAuxPowRules() (the height/
+    // policy gate, not yet spliced into that later call) is ever reached --
+    // regardless of what that later gate would have decided. Replaced with
+    // the header-aware dispatcher (src/auxpow.h), which is behavior-
+    // identical to the old call for every block that exists today (no
+    // header has the AUXPOW bit set before real AuxPoW-producing code
+    // exists) and correctly defers to CAuxPow::Check() for one that does.
+    if (fCheckPOW && !CheckBitAIProofOfWork(block, consensusParams, state))
+        return false; // CheckBitAIProofOfWork already populated `state`
 
     return true;
 }
@@ -4098,8 +4108,18 @@ void ChainstateManager::GenerateCoinbaseCommitment(CBlock& block, const CBlockIn
 
 bool HasValidProofOfWork(std::span<const CBlockHeader> headers, const Consensus::Params& consensusParams)
 {
-    return std::ranges::all_of(headers,
-                               [&](const auto& header) { return CheckProofOfWork(header.GetHash(), header.nBits, consensusParams); });
+    // AuxPoW audit finding (item 3): used to call CheckProofOfWork(header.
+    // GetHash(), ...) directly -- this is the bulk PoW pre-check net_processing
+    // runs on a whole received HEADERS batch before further processing, so a
+    // valid AuxPoW header would have been rejected right here. Replaced with
+    // the dispatcher (src/auxpow.h); this function's own bool-only contract
+    // is unchanged (a per-header BlockValidationState is still constructed,
+    // but its specific reason is intentionally discarded here, exactly as
+    // before -- this function never exposed per-header reasons).
+    return std::ranges::all_of(headers, [&](const auto& header) {
+        BlockValidationState state;
+        return CheckBitAIProofOfWork(header, consensusParams, state);
+    });
 }
 
 bool IsBlockMutated(const CBlock& block, bool check_witness_root)

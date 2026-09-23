@@ -265,6 +265,58 @@ bool CheckAuxPowRules(int32_t nVersion, int nHeight, const uint256& hashHeader, 
                        const Consensus::Params& params, BlockValidationState& state);
 
 /**
+ * BitAIcoin's real, frozen AuxPoW chain ID (docs/AUXPOW_MILESTONE.md sec.5/B):
+ * 16969 / 0x4249, the two ASCII bytes "BI" read as a big-endian u16. Promoted
+ * here from a proposal-only value to a real, named consensus constant now
+ * that CheckBitAIProofOfWork() below needs to reference it directly.
+ */
+static constexpr int32_t BITAI_AUXPOW_CHAIN_ID = 16969;
+
+/**
+ * The single header-level proof-of-work decision point: "is this header's
+ * OWN SELECTED proof mechanism (direct SHA256d, or AuxPoW) cryptographically
+ * valid?" -- deliberately NOT a statement about whether that mechanism is
+ * ALLOWED at this header's height (that is CheckAuxPowRules()'s job, kept
+ * separate on purpose -- see the comment there and docs/AUXPOW_MILESTONE.md
+ * sec.0/4). Do not collapse the two: this function has no height parameter
+ * and must not gain one.
+ *
+ * `CheckProofOfWorkImpl`/`CheckProofOfWork` (src/pow.h) remain exactly what
+ * they always were -- the plain, low-level hash-vs-target primitive, with
+ * NO knowledge of AuxPoW. This function is the header-aware DISPATCHER in
+ * front of it, matching the architectural split real Namecoin/Dogecoin-
+ * style AuxPoW implementations use (their own AuxPoW-aware check dispatches
+ * between child-header PoW and parent-header PoW, while their generic
+ * CheckProofOfWork stays a plain hash/target check) -- not a new pattern
+ * invented for this codebase.
+ *
+ * Semantics:
+ *   - DIRECT block (`header.IsAuxpow()` false): no proof required; the
+ *     header's OWN hash must satisfy the header's OWN `nBits`, via the
+ *     ordinary, unmodified `CheckProofOfWork`. Byte-for-byte the same
+ *     decision every block before this function existed would have gotten.
+ *   - AUXPOW block (`header.IsAuxpow()` true): a proof MUST be attached
+ *     (`header.auxpow != nullptr`); the header's own hash is explicitly NOT
+ *     required to satisfy `nBits` (only the parent block's hash is, and
+ *     that check lives inside `CAuxPow::Check()`); `CAuxPow::Check()` is
+ *     called with this header's own hash (the commitment the proof must
+ *     prove the parent committed to) and this header's own `nBits` (the
+ *     BitAIcoin-chain target the parent's hash must satisfy) --
+ *     `BITAI_AUXPOW_CHAIN_ID` is passed as the required chain ID, so a
+ *     proof legitimately produced for some OTHER merge-mined chain's ID is
+ *     rejected here, at the cryptographic-validity layer, not deferred to
+ *     policy.
+ *
+ * Safe to call unconditionally on every header, at every height, before
+ * AuxPoW activation exists in any policy sense: no header can have the
+ * AUXPOW bit set before real AuxPoW-producing code exists (there is none
+ * yet -- GBT/mining wiring is a later, separate slice), so this is
+ * byte-for-byte behavior-identical to a plain `CheckProofOfWork(header.
+ * GetHash(), header.nBits, params)` call for every block that exists today.
+ */
+bool CheckBitAIProofOfWork(const CBlockHeader& header, const Consensus::Params& params, BlockValidationState& state);
+
+/**
  * A merkle branch with more than this many levels is malformed on its face
  * (2^32 leaves would need at most 32 levels; anything more cannot correspond
  * to any real transaction position) -- rejected before any hashing work is
@@ -420,5 +472,46 @@ struct AuxPowHeaderFormatter {
     template <typename Stream>
     static void Unser(Stream& s, CBlockHeader& header) { UnserializeBlockHeaderWithAuxPow(header, s); }
 };
+
+/**
+ * HEADERS-message (de)serialization, auxpow-aware, for
+ * `std::vector<CBlockHeader>` -- the real wire shape net_processing.cpp
+ * uses for a HEADERS message: a compact-size count, then per header the six
+ * base fields (plus an auxpow payload when its version bit is set) followed
+ * by a compact-size 0 (the historical "as if each header were a CBlock with
+ * zero transactions" convention -- preserved EXACTLY, not reinterpreted:
+ * real Bitcoin's own headers-first design reused the block wire shape for
+ * this, and this stays byte-for-byte compatible with that for any header
+ * with no auxpow attached).
+ *
+ * Only a SEND-side wrapper is provided here (`AuxPowHeadersForAnnounce`):
+ * net_processing.cpp's real receive path already does its own manual
+ * per-element loop (to enforce `max_headers_result` via `Misbehaving()`
+ * before ever allocating `nCount` headers' worth of memory -- a real DoS
+ * defense that must not be bypassed by a generic vector-formatter that
+ * would resize/loop before that check could run). The receive side is
+ * fixed in place, in net_processing.cpp itself, by swapping only its
+ * per-header deserialization call from the plain generic one to
+ * `UnserializeBlockHeaderWithAuxPow` -- not by introducing a competing
+ * mechanism here that would have to duplicate that size check to be safe.
+ */
+namespace detail {
+struct AuxPowHeadersVectorWrapper {
+    const std::vector<CBlockHeader>& headers;
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        WriteCompactSize(s, headers.size());
+        for (const auto& header : headers) {
+            SerializeBlockHeaderWithAuxPow(header, s);
+            WriteCompactSize(s, 0); // historical trailing tx-count=0, preserved exactly
+        }
+    }
+};
+} // namespace detail
+inline detail::AuxPowHeadersVectorWrapper AuxPowHeadersForAnnounce(const std::vector<CBlockHeader>& headers)
+{
+    return detail::AuxPowHeadersVectorWrapper{headers};
+}
 
 #endif // BITCOIN_AUXPOW_H

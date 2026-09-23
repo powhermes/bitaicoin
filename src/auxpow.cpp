@@ -268,3 +268,46 @@ bool CheckAuxPowRules(int32_t nVersion, int nHeight, const uint256& hashHeader, 
 
     return auxpow->Check(hashHeader, expectedChainId, nBits, params, state);
 }
+
+bool CheckBitAIProofOfWork(const CBlockHeader& header, const Consensus::Params& params, BlockValidationState& state)
+{
+    if (!header.IsAuxpow()) {
+        // DIRECT block: unchanged, ordinary check on the header's own hash.
+        if (!CheckProofOfWork(header.GetHash(), header.nBits, params)) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                  "high-hash", "proof of work failed");
+        }
+        return true;
+    }
+
+    // AUXPOW block: the header's own hash is deliberately NOT checked
+    // against nBits here -- only the parent block's hash is, inside
+    // CAuxPow::Check(). A missing proof is a cryptographic-validity
+    // failure at this layer (there is nothing to validate), not a policy
+    // question -- CheckAuxPowRules() (separately, not called from here)
+    // additionally requires height policy around this same fact.
+    if (!header.auxpow) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                              "auxpow-missing",
+                              "AUXPOW version bit set but no AuxPoW proof attached");
+    }
+
+    // Real gap caught before this was ever tested (not by a failing test):
+    // an earlier version of this function passed BITAI_AUXPOW_CHAIN_ID into
+    // Check() for its internal index-grinding math, but never confirmed the
+    // header's OWN nVersion actually claims that same chain ID -- meaning a
+    // header could carry a proof that mathematically checks out against the
+    // hardcoded constant while its own declared identity said something
+    // else entirely. This is a cryptographic-identity check (does this
+    // header consistently claim to BE what it's being validated as), not a
+    // height/activation policy question, so it belongs here, not deferred
+    // to CheckAuxPowRules() (which separately also checks this, as
+    // defense in depth once spliced in -- redundant checks here are safe).
+    if (GetChainId(header.nVersion) != BITAI_AUXPOW_CHAIN_ID) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                              "auxpow-wrong-chain-id",
+                              "AuxPoW version's chain ID does not match BitAIcoin's registered ID");
+    }
+
+    return header.auxpow->Check(header.GetHash(), BITAI_AUXPOW_CHAIN_ID, header.nBits, params, state);
+}
