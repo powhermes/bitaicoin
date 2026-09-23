@@ -217,3 +217,42 @@ bool CAuxPow::Check(const uint256& hashAuxBlock, int32_t nChainId, uint32_t nBit
 
     return true;
 }
+
+bool CheckAuxPowRules(int32_t nVersion, int nHeight, const uint256& hashHeader, uint32_t nBits,
+                       const CAuxPow* auxpow, int32_t expectedChainId, int activationHeight,
+                       const Consensus::Params& params, BlockValidationState& state)
+{
+    const bool isAuxpow = IsAuxpowVersion(nVersion);
+
+    if (nHeight < activationHeight) {
+        if (isAuxpow) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                  "auxpow-before-activation",
+                                  "AuxPoW version bit set before the activation height");
+        }
+        // Pre-activation, non-AuxPoW: nothing further to check here; ordinary
+        // CheckProofOfWork on the header's own hash applies as always.
+        return true;
+    }
+
+    if (!isAuxpow) {
+        // Post-activation, direct mining: still valid. AuxPoW is an
+        // additional accepted proof format, not a replacement.
+        return true;
+    }
+
+    const int32_t chainId = GetChainId(nVersion);
+    if (chainId != expectedChainId) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                              "auxpow-wrong-chain-id",
+                              "AuxPoW version's chain ID does not match this chain's registered ID");
+    }
+
+    if (auxpow == nullptr) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                              "auxpow-missing",
+                              "AuxPoW version bit set but no AuxPoW proof was supplied");
+    }
+
+    return auxpow->Check(hashHeader, expectedChainId, nBits, params, state);
+}

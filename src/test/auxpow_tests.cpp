@@ -362,4 +362,110 @@ BOOST_AUTO_TEST_CASE(version_bit_helpers_roundtrip)
     BOOST_CHECK_EQUAL(GetBaseVersion(v), 4);
 }
 
+// --- CheckAuxPowRules: the standalone height-gate/version-rule tests ---
+// (auxpow itself not yet wired into CBlockHeader/ContextualCheckBlockHeader --
+// see the design-hazard comment on CheckAuxPowRules's declaration in
+// auxpow.h -- these test the extracted logic directly against explicit
+// parameters, exactly as it will be called once that wiring lands.)
+
+namespace {
+const int32_t TEST_ACTIVATION_HEIGHT = 227808;
+} // namespace
+
+BOOST_AUTO_TEST_CASE(auxpow_rules_reject_auxpow_bit_before_activation)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    BlockValidationState state;
+    int32_t v = MakeAuxpowVersion(TEST_CHAIN_ID, 1);
+    bool ok = CheckAuxPowRules(v, TEST_ACTIVATION_HEIGHT - 1, TestAuxBlockHash(), EASY_BITS,
+                               nullptr, TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, state);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "auxpow-before-activation");
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_rules_allow_direct_mining_before_activation)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    BlockValidationState state;
+    bool ok = CheckAuxPowRules(1 /* plain version, no AUXPOW bit */, TEST_ACTIVATION_HEIGHT - 1,
+                               TestAuxBlockHash(), EASY_BITS, nullptr, TEST_CHAIN_ID,
+                               TEST_ACTIVATION_HEIGHT, params, state);
+    BOOST_CHECK(ok);
+    BOOST_CHECK(state.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_rules_allow_direct_mining_after_activation)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    BlockValidationState state;
+    bool ok = CheckAuxPowRules(1 /* plain version, no AUXPOW bit */, TEST_ACTIVATION_HEIGHT,
+                               TestAuxBlockHash(), EASY_BITS, nullptr, TEST_CHAIN_ID,
+                               TEST_ACTIVATION_HEIGHT, params, state);
+    BOOST_CHECK(ok);
+    BOOST_CHECK(state.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_rules_reject_missing_proof_after_activation)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    BlockValidationState state;
+    int32_t v = MakeAuxpowVersion(TEST_CHAIN_ID, 1);
+    bool ok = CheckAuxPowRules(v, TEST_ACTIVATION_HEIGHT, TestAuxBlockHash(), EASY_BITS,
+                               nullptr /* no proof supplied */, TEST_CHAIN_ID,
+                               TEST_ACTIVATION_HEIGHT, params, state);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "auxpow-missing");
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_rules_reject_wrong_chain_id_in_version)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    BlockValidationState state;
+    int32_t v = MakeAuxpowVersion(98 /* Dogecoin's real chain ID, not ours */, 1);
+    CAuxPow auxpow = BuildValidAuxPow(TestAuxBlockHash(), EASY_BITS, params);
+    bool ok = CheckAuxPowRules(v, TEST_ACTIVATION_HEIGHT, TestAuxBlockHash(), EASY_BITS,
+                               &auxpow, TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, state);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "auxpow-wrong-chain-id");
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_rules_accept_valid_proof_after_activation)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    const uint256 hashAuxBlock = TestAuxBlockHash();
+    BlockValidationState state;
+    int32_t v = MakeAuxpowVersion(TEST_CHAIN_ID, 1);
+    CAuxPow auxpow = BuildValidAuxPow(hashAuxBlock, EASY_BITS, params);
+    bool ok = CheckAuxPowRules(v, TEST_ACTIVATION_HEIGHT, hashAuxBlock, EASY_BITS,
+                               &auxpow, TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, state);
+    BOOST_CHECK(ok);
+    BOOST_CHECK(state.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_rules_at_exact_activation_boundary)
+{
+    // Off-by-one sanity: the block AT activationHeight is post-activation
+    // (>=), the block immediately before is pre-activation.
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    const uint256 hashAuxBlock = TestAuxBlockHash();
+    int32_t v = MakeAuxpowVersion(TEST_CHAIN_ID, 1);
+    CAuxPow auxpow = BuildValidAuxPow(hashAuxBlock, EASY_BITS, params);
+
+    BlockValidationState stateAt;
+    BOOST_CHECK(CheckAuxPowRules(v, TEST_ACTIVATION_HEIGHT, hashAuxBlock, EASY_BITS, &auxpow,
+                                 TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, stateAt));
+
+    BlockValidationState stateBefore;
+    BOOST_CHECK(!CheckAuxPowRules(v, TEST_ACTIVATION_HEIGHT - 1, hashAuxBlock, EASY_BITS, &auxpow,
+                                  TEST_CHAIN_ID, TEST_ACTIVATION_HEIGHT, params, stateBefore));
+    BOOST_CHECK_EQUAL(stateBefore.GetRejectReason(), "auxpow-before-activation");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

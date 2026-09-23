@@ -132,12 +132,44 @@ building an actual fake parent block and running it through `Check()`; all 9 pas
 existing 749-case `test_bitcoin` suite still passes with zero regressions (both verified by an actual
 `cmake --build` + test run this session, not assumed).
 
-**Explicitly NOT yet done, next slice:** wiring this into `CheckProofOfWorkImpl`,
-`ContextualCheckBlockHeader`, net_processing's header/block relay, and GBT/mining. Splicing new
-block-acceptance-path serialization into the live consensus code is being kept as its own separate,
-reviewed change rather than folded into the same commit as the core logic -- consistent with "built
-and tested incrementally" above. The DAA branch (ASERT, sec.3/A) is validated as a standalone module
-(`contrib/asert_reference.py`) but likewise not yet wired into `pow.cpp`'s real `GetNextWorkRequired`
+**Status update (2026-09-23, later): height-gate/version-rule logic built and tested, real hazards
+found and deliberately avoided rather than papered over.** Attempted the next slice -- wiring
+`CAuxPow` into `CBlockHeader`'s own storage/serialization -- and found two genuine design hazards
+before writing any code around them:
+1. `CBlockHeader::GetHash()` computes `(HashWriter{} << *this).GetHash()`, using this type's own
+   generic `Serialize`. Naively adding the auxpow payload to `CBlockHeader`'s `SERIALIZE_METHODS`
+   would make an AuxPoW block's own identity hash silently include its auxpow bytes -- circular and
+   wrong, since `CAuxPow::Check()`'s whole job is to validate a proof *against* that hash, which
+   therefore cannot itself depend on the proof. The real fix (matching Namecoin's actual design):
+   the header-hash computation must always cover only the 6 base fields regardless of auxpow
+   presence, with the auxpow payload carried through a separate, explicit wire-format serialization
+   path (the same shape as SegWit's txid-vs-wtxid split via two distinct helpers, not one generic
+   conditional `Serialize`).
+2. Storing a `CAuxPow` on `CBlockHeader` needs a forward declaration plus explicit out-of-line
+   special members to avoid a circular include (`auxpow.h` needs the complete `CBlockHeader` type for
+   `CAuxPow::parentBlock`; `block.h` would need `CAuxPow`) -- mechanical, but `CBlockHeader` is used
+   throughout the entire node, and this deserves its own reviewed pass, not a rushed addition folded
+   into everything else already in flight.
+
+Rather than rush either fix into this same pass, the actual height-gate and pre/post-activation
+version-rule LOGIC was extracted into a standalone, explicitly-parameterized function,
+`CheckAuxPowRules()` (`src/auxpow.h`/`.cpp`), built and tested against explicit parameters instead of
+against `CBlockHeader`'s not-yet-existing auxpow storage -- so it's ready to be called from
+`ContextualCheckBlockHeader()` verbatim once that storage/serialization slice lands, without needing
+to be rewritten. Enforces: AUXPOW version bit rejected outright below the activation height; chain-ID
+mismatch rejected; missing proof rejected; a valid proof (chain ID + `CAuxPow::Check()`) accepted;
+direct (non-merge-mined) mining remains valid both before and after activation. 8 new real test cases
+added to `src/test/auxpow_tests.cpp` (now 17 total), covering the height boundary, both proof-present
+and proof-absent paths, and the chain-ID check. Verified for real: rebuilt from clean, ran the new
+cases (17/17 pass), then the full existing suite (756 cases, zero regressions) -- confirmed twice.
+
+**Explicitly still NOT done, next slices:** the `CBlockHeader` storage/serialization change itself
+(now scoped by the two hazards above, its own dedicated pass); splicing `CheckAuxPowRules()` into the
+real `ContextualCheckBlockHeader()` call path (mechanical once storage exists, but touches a function
+with many existing call sites and deserves its own review); `CheckProofOfWorkImpl` and net_processing
+header/block relay. The DAA branch (ASERT, sec.3/A) is validated as a standalone module
+(`contrib/asert_reference.py`, now with a proven arithmetic bound and Decred differential vectors --
+see the Addendum below) but likewise not yet wired into `pow.cpp`'s real `GetNextWorkRequired`
 dispatch. New RPCs, the obsolete-node fork test (protocol frozen in sec.C), and the stabilization
 checkpoint (sec.D) all remain after that wiring lands.
 

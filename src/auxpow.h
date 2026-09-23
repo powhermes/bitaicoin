@@ -217,4 +217,60 @@ public:
                const Consensus::Params& params, BlockValidationState& state) const;
 };
 
+/**
+ * Height-gated activation and pre/post-activation version-rule enforcement,
+ * kept deliberately STANDALONE from CBlockHeader for now rather than spliced
+ * into ContextualCheckBlockHeader() in this slice.
+ *
+ * Two real hazards were found while attempting that splice today, and both
+ * are why it is deferred rather than rushed:
+ *   1. `CBlockHeader::GetHash()` computes `(HashWriter{} << *this).GetHash()`,
+ *      which uses this exact type's own generic Serialize -- the SAME one
+ *      that would need to conditionally emit the auxpow payload for the wire
+ *      format. Naively adding auxpow to CBlockHeader's SERIALIZE_METHODS
+ *      would make an AuxPoW block's own identity hash silently include its
+ *      auxpow bytes, which is circular and wrong: CAuxPow::Check() commits
+ *      to hashAuxBlock, so that hash cannot itself depend on the auxpow
+ *      payload it is meant to validate. The real fix (matching Namecoin's
+ *      own design) is a header-hash computation that always covers only the
+ *      6 base fields regardless of auxpow presence, with the auxpow payload
+ *      carried through a SEPARATE, explicit wire-format serialization path
+ *      (the way SegWit's txid vs wtxid split is handled via two distinct
+ *      helper functions, not one generic conditional Serialize) -- a real,
+ *      multi-call-site change deserving its own dedicated pass.
+ *   2. Storing a `CAuxPow` (by value or pointer) on `CBlockHeader` needs
+ *      forward-declaration plus explicit out-of-line special members to
+ *      avoid a circular include (auxpow.h needs the complete CBlockHeader
+ *      type for CAuxPow::parentBlock; block.h would need CAuxPow) --
+ *      mechanical, but touches a type used throughout the entire node and
+ *      deserves its own review, not a rushed addition alongside everything
+ *      else in this pass.
+ *
+ * This function is the real height-gate/version-rule LOGIC, built and unit
+ * tested now against explicit parameters rather than against CBlockHeader's
+ * own (not-yet-existing) auxpow storage, so it is ready to be called from
+ * ContextualCheckBlockHeader() as soon as that storage/serialization slice
+ * lands, without needing to be rewritten.
+ *
+ * Rules enforced, matching docs/AUXPOW_MILESTONE.md sec.4/5:
+ *   - Below `activationHeight`: the AUXPOW version bit MUST NOT be set. A
+ *     pre-activation block/header claiming to be AuxPoW-flagged is rejected
+ *     outright -- the bit has no defined meaning before activation and must
+ *     not be silently ignored.
+ *   - At/after `activationHeight`, AUXPOW bit set: the block ID embedded in
+ *     the version (GetChainId) must equal `expectedChainId`; an `auxpow`
+ *     proof must be supplied (non-null); and it must pass `CAuxPow::Check()`
+ *     against this header's own hash and its own nBits (the auxiliary
+ *     chain's required target for this specific block, computed by
+ *     BitAIcoin's own DAA the ordinary way -- unaffected by AuxPoW).
+ *   - At/after `activationHeight`, AUXPOW bit NOT set: direct (non-merge-
+ *     mined) SHA256d mining remains valid, exactly as before activation --
+ *     AuxPoW is an additional accepted proof format, not a replacement that
+ *     forbids direct mining. This function has nothing further to check in
+ *     that case; ordinary `CheckProofOfWork` handles it as always.
+ */
+bool CheckAuxPowRules(int32_t nVersion, int nHeight, const uint256& hashHeader, uint32_t nBits,
+                       const CAuxPow* auxpow, int32_t expectedChainId, int activationHeight,
+                       const Consensus::Params& params, BlockValidationState& state);
+
 #endif // BITCOIN_AUXPOW_H
