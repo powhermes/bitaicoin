@@ -86,6 +86,7 @@ endif()
 # Similar to `bitcoin_util` library, but higher-level.
 add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   addresstype.cpp
+  auxpow.cpp
   base58.cpp
   bech32.cpp
   chain.cpp
