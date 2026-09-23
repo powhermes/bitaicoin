@@ -110,3 +110,166 @@ listed in the milestone). It will be built and tested incrementally, not deliver
 untested block of code — starting with the AuxPoW header/proof serialization and validation core,
 since every other piece (the RPCs, the tests, the multi-node upgrade) depends on that being correct
 first.
+
+## Addendum (2026-09-23): frozen details, before the first consensus commit
+
+Adds precision on top of §1-5 above per explicit follow-up instruction. Nothing in §1-5 above is
+changed; this section makes each item exact and adds three new required items.
+
+### A. ASERT specification, exact (BCH/BCHN `aserti3-2d`, not "ASERT-style")
+
+Reference: the BCH `aserti3-2d` specification (adopted via CHIP-2020-05, implemented in BCHN's
+`pow.cpp`), kept as a *separate* reference from the Namecoin/Syscoin AuxPoW references in §4 above
+-- these are two unrelated pieces of prior art (a difficulty algorithm and a merge-mining proof
+format) and should not be conflated.
+
+- **Target block interval:** 600 seconds -- reuses BitAIcoin's existing `nPowTargetSpacing`
+  unchanged. No new constant introduced for this.
+- **Anchor block:** height 227807, the last block validated under the legacy (pre-activation)
+  retarget algorithm. `anchor_target` and `anchor_time` are read from that block's own header --
+  not from a running EMA, not from the previous block once ASERT is live. Every subsequent block's
+  target is computed **fresh from this fixed anchor**, which is the core property that makes ASERT
+  immune to the cumulative-rounding-drift problem an EMA-style algorithm has.
+- **Exact formula:**
+  `next_target = anchor_target * 2^((time_diff - target_interval*(height_diff+1)) / halflife)`
+  where `time_diff` = current block's timestamp minus anchor block's timestamp, `height_diff` =
+  current block's height minus anchor height. The `height_diff + 1` (not `height_diff`) is
+  deliberate and matches the reference spec: it accounts for the anchor block itself already having
+  "used up" one interval's worth of schedule, so a block arriving exactly on schedule produces
+  exponent 0 (no change) rather than a small permanent bias.
+- **Integer algorithm:** BCHN's reference implementation computes this with **fixed-point
+  arithmetic, scale factor 2^16** (not floating point) -- `exponent = ((time_diff - target_interval
+  *(height_diff+1)) << 16) / halflife`, then splits `exponent` into an integer number of bit-shifts
+  (`exponent >> 16`) plus a fractional remainder in `[0, 65536)`, applies the integer shifts
+  directly to the 256-bit target, and approximates `2^(fractional/65536)` with a validated
+  polynomial. **I will implement and validate this integer path against BCHN's own published test
+  vectors before it is committed as consensus code** -- reproducing fixed-point polynomial
+  coefficients from memory is exactly the kind of thing that must be checked against a known-good
+  reference, not trusted on recall, given what "exactly, not merely ASERT-style" is asking for.
+- **powLimit / clamping behavior, corrected from my first pass:** the ceiling that matters is
+  `next_target <= consensus.powLimit` (targets can't get *easier* than the chain-wide floor
+  difficulty) -- **not** a floor preventing targets from getting *harder*; there is no consensus
+  minimum on the hard side other than the practical limits of the 256-bit representation. I had
+  this backwards in my first internal pass at simulating it; caught it before committing anything
+  by deriving the target/hashrate relationship analytically rather than trusting a first buggy
+  simulation run (details in §B).
+  **Concretely relevant to BitAIcoin today:** verified from the live node that the chain has been
+  running at exactly `consensus.powLimit` (bits `0x1d0fffff`) since block 225430, unchanged across
+  the one retarget that's already happened -- so relative to the anchor block, the powLimit ceiling
+  is *already binding*. Any future hashrate withdrawal cannot ease the target further from where it
+  already sits; it can only slow blocks down, with no consensus-level relief available. This is
+  correct, expected behavior for a chain already at its easiest allowed setting, not a bug.
+- **Compact-target (`nBits`) rounding:** Bitcoin's compact format keeps only ~3 significant bytes of
+  mantissa, so converting a full 256-bit target to `nBits` always rounds toward the nearest
+  representable compact value (in practice, rounds the true target down slightly). ASERT's design
+  avoids this compounding block-over-block *because it always recomputes from the anchor's original,
+  full-precision target*, not from a previously-rounded `nBits` value re-expanded -- the rounding
+  error doesn't accumulate the way it can in an EMA-based algorithm. This must be implemented as
+  "recompute from the anchor every time," not "carry forward the last computed target," or that
+  property is lost.
+
+#### Half-life: simulated, not guessed
+
+Built a deterministic (expected-value) simulation of the exact formula above, at BitAIcoin's real
+`nPowTargetSpacing` of 600s, against the requested 10x/100x/1000x arrival (hashrate increase) and
+withdrawal (hashrate decrease) shocks, across six half-life candidates. Two real bugs were caught
+and fixed while building it before trusting any output: (1) the target/hashrate relation was
+initially inverted (fixed by deriving the steady-state condition analytically: for a permanent
+hashrate multiplier k, the correct equilibrium is `relative_target = 1/k`, not `k`); (2) the
+powLimit ceiling above had to be added, or withdrawal scenarios produce a nonsensical unbounded
+blow-up in the model.
+
+| half-life | arrival 10x | arrival 100x | arrival 1000x | withdrawal (any factor) |
+|---|---|---|---|---|
+| 1 hour | 38 blk / 6.4h | 59 blk / 6.5h | 79 blk / 6.6h | clamped at powLimit, no recovery possible |
+| 2 hours | 77 blk / 9.6h | 119 blk / 10.0h | 159 blk / 10.0h | same |
+| 6 hours | 233 blk / 22.8h | 358 blk / 23.7h | 478 blk / 23.8h | same |
+| 1 day | 934 blk / 82.3h | 1432 blk / 85.6h | 1913 blk / 86.0h | same |
+| 2 days (BCH mainnet) | 1869 blk / 161.7h | 2865 blk / 168.2h | 3826 blk / 168.9h | same |
+| 4 days | 3739 blk / 320.5h | 5731 blk / 333.6h | 7652 blk / 334.9h | same |
+
+"Settle" = the ratio of actual to target block-arrival rate stays within 10% for at least 20
+consecutive blocks. Withdrawal scenarios never show a settling time because, given the chain's
+*current* anchor-adjacent state (already at powLimit), there is nothing for the algorithm to ease
+toward -- it correctly holds at the ceiling and blocks simply arrive slower, with the deviation
+exactly equal to the withdrawal factor for as long as the withdrawal persists. This is a genuine,
+useful finding, not a gap in the study: it means the arrival direction is the one with real dynamics
+to tune for right now, and the withdrawal direction is a *clamp-is-honored* test, not a
+*settling-speed* test.
+
+**Recommendation: half-life = 6 hours (21600 seconds).** Settles a full 10x-1000x arrival shock
+within about a day of dedicated testing (22.8-23.8 hours), which fits a deliberate, hands-on stress
+test session, while being 36x longer than the 1-hour candidate -- long enough that ordinary
+block-timestamp noise, or a short deliberate timestamp-shading attempt, can't whipsaw the difficulty
+the way an extremely short half-life would let it. This is a recommendation with the evidence
+attached, not a final decision on my authority alone -- happy to move to 1-2 hours for faster
+test iteration, or 1+ day for more manipulation resistance, if either is preferred once the table is
+in front of you.
+
+### B. AuxPoW chain ID 16969 -- checked now, real search, sources included
+
+Searched actual chainparams source and the Bitcoin/BCH merged-mining wiki for every real assigned
+AuxPoW chain ID I could find. Confirmed values, with sources:
+
+| Chain | nAuxpowChainId |
+|---|---|
+| Namecoin | 1 (`0x0001`) |
+| IXCoin | 3 (`0x0003`) mainnet; 1 on testnet/regtest (shared with Namecoin -- accepted there because strict chain-ID checking is normally relaxed on test networks, not something to copy for BitAIcoin's own mainnet-equivalent) |
+| Bunkercoin | 73 (`0x0042`) |
+| Myriadcoin | 90 (`0x005A`) |
+| Dogecoin | 98 (`0x0062`) |
+| Elastos (ELA, actively merge-mined with real Bitcoin today) | 1224 |
+
+**16969 collides with none of these.** Phrased honestly, as instructed: this is **"no known
+collision,"** not a guarantee of global uniqueness -- there is no single authoritative registry, and
+smaller or now-dead merge-mined alts (I0Coin, Devcoin, and others) may have used values I couldn't
+find a documented source for. `BitAIForkId` (0x424149, "BAI", a sighash replay-protection value) and
+the AuxPoW chain ID (16969, "BI") remain **completely separate constants used for unrelated
+purposes** -- confirmed unchanged from the original proposal.
+
+Sources: [Merged mining specification](https://en.bitcoin.it/wiki/Merged_mining_specification),
+[IXCoin chainparams.cpp](https://github.com/IXCore/IXCoin/blob/master/src/chainparams.cpp),
+[Dogecoin chainparams.cpp](https://github.com/dogecoin/dogecoin/blob/master/src/chainparams.cpp),
+[Myriadcoin chainparams.cpp](https://github.com/myriadcoin/myriadcoin/blob/master/src/chainparams.cpp),
+[Bunkercoin chainparams.cpp](https://github.com/bunkercoin/bunkercoin/blob/master/src/chainparams.cpp),
+[Elastos merged-mining guide](https://github.com/elastos/Elastos.ELA/wiki/Merged-mining-guide).
+
+### C. Obsolete-node fork test -- protocol frozen now, run once implementation exists
+
+**Preserved today, before any consensus code changes,** so the test later uses a byte-identical,
+guaranteed-authentic pre-AuxPoW binary rather than a rebuild that could drift:
+
+- Mac (arm64): `~/Downloads/bitaicoin-dev/pre-auxpow-binaries-mac/{bitaicoind,bitaicoin-cli}`,
+  sha256 `f76a767b...` / `e901817e...`
+- BITAISERVER3 (x86_64): `/opt/pre-auxpow-binaries/{bitaicoind,bitaicoin-cli}`,
+  sha256 `f692667b...` / `e927276c...`
+- Both built from `bitaicoin-phase1` @ `2734adbd25` (docs-only; no consensus code exists on top of
+  this yet).
+
+**Test protocol, to run once AuxPoW is implemented and before crossing 227808 for real:**
+1. Stand up a 4th node instance running the preserved old binary, on its own datadir, `addnode`'d to
+   the three upgraded nodes, synced to the same pre-activation tip.
+2. Mine/advance the upgraded three-node network across height 227808 using real AuxPoW-validated
+   blocks.
+3. Record explicitly: the old node's final tip height and hash (expected: stalls at 227807 and never
+   advances, since it should either fail to deserialize the new block format's AuxPoW-flagged
+   version bit or reject a header it can't validate -- the *exact* failure mode, not just "it
+   stalls," is the point of running this for real rather than assuming); any error/log output it
+   produces; whether it crashes versus cleanly rejects.
+4. Confirm all three upgraded nodes converge on the same tip hash as each other after the boundary.
+5. Document old-node-versus-upgraded-node behavior explicitly in the milestone doc, with the actual
+   recorded heights/hashes/log excerpts -- this is a deliberate hard fork, proven while the network
+   is still private, exactly as instructed.
+
+### D. Post-activation stabilization checkpoint -- placeholder only, no hash yet
+
+Not chosen now, deliberately. Criteria to be met before a specific block is picked and recorded as
+the checkpoint/baseline: the chain must have (1) crossed 227808 under real AuxPoW validation, (2)
+survived a restart of all three nodes from that state, (3) survived at least one real reorg crossing
+the activation boundary, and (4) run under sustained, substantial SHA256d hashpower for long enough
+to demonstrate the DAA settling behavior in practice, not just in simulation. Once all four hold,
+the specific height/hash/chainwork of a block chosen from that proven run gets recorded here.
+
+### Confirmed unchanged
+Existing blocks 225430-225823 remain untouched -- nothing above alters how any existing block
+validates. Proceeding to the AuxPoW serialization/validation core next.
