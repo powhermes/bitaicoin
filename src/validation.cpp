@@ -4226,6 +4226,26 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                                  strprintf("rejected nVersion=0x%08x block", block.nVersion));
     }
 
+    // AuxPoW (merge-mining) height/version policy gate -- separate from, and
+    // checked in addition to, CheckBitAIProofOfWork()'s cryptographic-validity
+    // check (already run earlier, in CheckBlockHeader()/CheckBlock(), before
+    // this contextual function is ever reached). This function answers "is
+    // AuxPoW allowed HERE" (height/chain-ID/version-encoding policy); it does
+    // not re-verify the proof's own cryptographic validity, which is already
+    // proven true by the time execution reaches this point -- see
+    // CheckAuxPowRules()'s own doc comment in src/auxpow.h and
+    // docs/AUXPOW_MILESTONE.md sec.0/4 for why the two are kept separate.
+    // Every chain except the real BitAIcoin one leaves
+    // BitAIAuxpowActivationHeight at INT_MAX, so `nHeight < activationHeight`
+    // is always true there and this reduces to the existing
+    // "AUXPOW bit must not be set" pre-activation rule for every block that
+    // exists anywhere else -- unaffected, by construction.
+    if (!CheckAuxPowRules(block.nVersion, nHeight, block.GetHash(), block.nBits,
+                          block.auxpow.get(), BITAI_AUXPOW_CHAIN_ID,
+                          consensusParams.BitAIAuxpowActivationHeight, consensusParams, state)) {
+        return false;
+    }
+
     return true;
 }
 

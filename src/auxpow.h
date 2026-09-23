@@ -11,18 +11,23 @@
 // CTransactionRef, arith_uint256) rather than vendored verbatim from either,
 // per docs/AUXPOW_MILESTONE.md sec.4.
 //
-// SCOPE OF THIS FILE, stated explicitly (see docs/AUXPOW_MILESTONE.md for the
-// full status): this is the serialization + standalone validation core
-// (CAuxPow::Check()), covered by real unit tests in src/test/auxpow_tests.cpp
-// that construct a fake parent block end-to-end and verify both accept and
-// reject paths. It is NOT YET wired into CheckProofOfWorkImpl,
-// ContextualCheckBlockHeader, net_processing's header/block relay, or GBT/
-// mining -- that wiring is the deliberately separate next slice, because
-// splicing new block-acceptance-path serialization into the live consensus
-// code without its own dedicated review pass would be exactly the kind of
-// unreviewed, rushed consensus change this whole milestone process exists to
-// avoid. Existing blocks 225430-225823, and all validation of blocks below
-// the (still unactivated) AuxPoW height, are untouched by this file.
+// STATUS (see docs/AUXPOW_MILESTONE.md for the full history of how this was
+// built up in separate, reviewed slices): serialization + validation core
+// (CAuxPow::Check()), the header-level CheckBitAIProofOfWork() dispatcher,
+// and the CheckAuxPowRules() height/policy gate are all wired into the live
+// path -- CheckBlockHeader()/HasValidProofOfWork() (src/validation.cpp) call
+// CheckBitAIProofOfWork() in place of the plain CheckProofOfWork() for every
+// header; ContextualCheckBlockHeader() calls CheckAuxPowRules() using
+// consensusParams.BitAIAuxpowActivationHeight (227808 on the real BitAIcoin
+// chain). net_processing's header/block relay and on-demand disk storage
+// (node/blockstorage.cpp) are likewise wired -- see the real call-site
+// comments in each of those files, not just this one. `CheckProofOfWorkImpl`/
+// `CheckProofOfWork` (src/pow.h) remain deliberately untouched, exactly as
+// designed (see CheckBitAIProofOfWork()'s own doc comment below). GBT/mining
+// RPCs (createauxblock/submitauxblock) and ASERT dispatch remain separate,
+// not-yet-built later slices. Existing blocks 225430-225823 remain untouched
+// by any of this -- they are all pre-activation and below AuxPoW's height
+// gate regardless.
 
 #ifndef BITCOIN_AUXPOW_H
 #define BITCOIN_AUXPOW_H
@@ -209,39 +214,35 @@ public:
 using CAuxPowRef = std::shared_ptr<const CAuxPow>;
 
 /**
- * Height-gated activation and pre/post-activation version-rule enforcement,
- * kept deliberately STANDALONE from CBlockHeader for now rather than spliced
- * into ContextualCheckBlockHeader() in this slice.
+ * Height-gated activation and pre/post-activation version-rule enforcement.
  *
- * Two real hazards were found while attempting that splice today, and both
- * are why it is deferred rather than rushed:
- *   1. `CBlockHeader::GetHash()` computes `(HashWriter{} << *this).GetHash()`,
- *      which uses this exact type's own generic Serialize -- the SAME one
- *      that would need to conditionally emit the auxpow payload for the wire
- *      format. Naively adding auxpow to CBlockHeader's SERIALIZE_METHODS
- *      would make an AuxPoW block's own identity hash silently include its
- *      auxpow bytes, which is circular and wrong: CAuxPow::Check() commits
- *      to hashAuxBlock, so that hash cannot itself depend on the auxpow
- *      payload it is meant to validate. The real fix (matching Namecoin's
- *      own design) is a header-hash computation that always covers only the
- *      6 base fields regardless of auxpow presence, with the auxpow payload
- *      carried through a SEPARATE, explicit wire-format serialization path
- *      (the way SegWit's txid vs wtxid split is handled via two distinct
- *      helper functions, not one generic conditional Serialize) -- a real,
- *      multi-call-site change deserving its own dedicated pass.
- *   2. Storing a `CAuxPow` (by value or pointer) on `CBlockHeader` needs
- *      forward-declaration plus explicit out-of-line special members to
- *      avoid a circular include (auxpow.h needs the complete CBlockHeader
- *      type for CAuxPow::parentBlock; block.h would need CAuxPow) --
- *      mechanical, but touches a type used throughout the entire node and
- *      deserves its own review, not a rushed addition alongside everything
- *      else in this pass.
+ * SPLICED into the live path as of 2026-09-23 (docs/AUXPOW_MILESTONE.md
+ * sec.5): called from `ContextualCheckBlockHeader()` (src/validation.cpp)
+ * using `consensusParams.BitAIAuxpowActivationHeight` as `activationHeight`
+ * (227808 for the real BitAIcoin chain; INT_MAX, i.e. permanently
+ * pre-activation, for every other chain type; 1 for REGTEST, matching
+ * BIP34Height's own "always active unless overridden" convention, so
+ * regtest-based tests can exercise real acceptance near genesis).
  *
- * This function is the real height-gate/version-rule LOGIC, built and unit
- * tested now against explicit parameters rather than against CBlockHeader's
- * own (not-yet-existing) auxpow storage, so it is ready to be called from
- * ContextualCheckBlockHeader() as soon as that storage/serialization slice
- * lands, without needing to be rewritten.
+ * Originally built and unit-tested standalone, against explicit parameters,
+ * before `CBlockHeader::auxpow` storage existed at all -- two real hazards
+ * were resolved before this function could be usefully called from real
+ * validation: (1) `CBlockHeader::GetHash()` had to be proven to cover only
+ * the 6 base fields regardless of auxpow presence (a naive addition to
+ * `SERIALIZE_METHODS` would make an AuxPoW block's own identity hash
+ * circularly depend on the very proof it's used to validate), solved via the
+ * separate `SerializeBlockHeaderWithAuxPow`/`GetHash()` split documented on
+ * `CBlockHeader::auxpow` in primitives/block.h; (2) storing a `CAuxPow` on
+ * `CBlockHeader` needed the forward-declaration/shared_ptr design also
+ * documented there. Both landed in earlier, separate, dedicated passes
+ * before this splice -- kept as history here since it explains why this
+ * function was built and tested well before it was actually wired in, not
+ * because that state still holds today.
+ *
+ * This function itself remains callable/testable in complete isolation
+ * (see src/test/auxpow_tests.cpp's boundary tests, which call it directly
+ * with literal heights rather than mining a real chain to them) -- the live
+ * splice is an additional real call site, not a replacement for that.
  *
  * Rules enforced, matching docs/AUXPOW_MILESTONE.md sec.4/5:
  *   - Below `activationHeight`: the AUXPOW version bit MUST NOT be set. A

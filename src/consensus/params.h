@@ -173,6 +173,20 @@ struct Params {
     uint256 BitAIHistoricalPowLimit{};
 
     /**
+     * BitAIAuxpowActivationHeight: a SEPARATE, later milestone from
+     * BitAIActivationHeight above -- not to be confused with it. That field
+     * gates the one-time Bitcoin-to-BitAIcoin fork transition (225430, long
+     * since passed); this one gates AuxPoW (merge-mining) support, height
+     * 227808 on the real BitAIcoin chain, enforced via CheckAuxPowRules()
+     * (src/auxpow.h) from ContextualCheckBlockHeader. Defaults to INT_MAX so
+     * every other chain (and BitAIcoin below this height) is provably
+     * unaffected -- see docs/AUXPOW_MILESTONE.md sec.0 for the permanent
+     * policy this height activates (both direct SHA256d mining AND AuxPoW
+     * valid forever, never AuxPoW-only).
+     */
+    int BitAIAuxpowActivationHeight{std::numeric_limits<int>::max()};
+
+    /**
      * If true, witness commitments contain a payload equal to a Bitcoin Script solution
      * to the signet challenge. See BIP325.
      */

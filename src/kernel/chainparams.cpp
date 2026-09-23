@@ -384,6 +384,14 @@ public:
         // BitAIHistoricalPowLimit's comment in consensus/params.h).
         consensus.BitAIHistoricalPowLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
+        // AuxPoW (merge-mining) activation -- a SEPARATE, later milestone from
+        // BitAIActivationHeight above, not to be confused with it (see the field's own
+        // doc comment in consensus/params.h). The next 2016-block retarget boundary
+        // after the height this milestone's audit work was done at (225823), per
+        // docs/AUXPOW_MILESTONE.md sec.0/1. Enforced via CheckAuxPowRules()
+        // (src/auxpow.h) from ContextualCheckBlockHeader.
+        consensus.BitAIAuxpowActivationHeight = 227808;
+
         // Collision-free, generated-once network identity (see docs/CHAIN_IDENTITY.md).
         // Deliberately not Bitcoin's f9beb4d9/8333, and not shared with any other chain
         // defined in this file.
@@ -795,6 +803,16 @@ public:
         consensus.BIP66Height = 1;  // Always active unless overridden
         consensus.CSVHeight = 1;    // Always active unless overridden
         consensus.SegwitHeight = 0; // Always active unless overridden
+        // AuxPoW: matches BIP34Height's own "always active unless overridden"
+        // regtest convention above, deliberately -- this is a private BitAIcoin
+        // fork addition (not stock Bitcoin Core), not a real production
+        // activation height (that's ChainType::BITAICOIN's own 227808, set
+        // separately). Needed so regtest-based tests (src/test/auxpow_tests.cpp's
+        // auxpow_transport_tests suite, test/functional/feature_auxpow_prune.py)
+        // can exercise real AuxPoW block acceptance through the live
+        // ContextualCheckBlockHeader path near genesis, exactly as every other
+        // buried deployment already does on regtest.
+        consensus.BitAIAuxpowActivationHeight = 1;
         consensus.MinBIP9WarningHeight = 0;
         consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
         consensus.nPowTargetTimespan = 24 * 60 * 60; // one day

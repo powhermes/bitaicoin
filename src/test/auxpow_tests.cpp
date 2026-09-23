@@ -1418,16 +1418,18 @@ BOOST_AUTO_TEST_SUITE_END()
 // end to end -- only the socket-framing layer would differ, which carries
 // no AuxPoW-specific risk of its own.
 //
-// ALSO HONEST: this block is accepted at whatever tiny regtest height this
-// test reaches (a handful of blocks past genesis) because CheckAuxPowRules()
-// -- the height/policy gate -- is NOT spliced into the live path yet, so
-// nothing currently forbids an AUXPOW-flagged block at any height. That is
-// the correct, expected result for what exists today, not evidence that
-// AuxPoW is "allowed" at low heights as a matter of policy -- once
-// CheckAuxPowRules() is spliced in next, a real activation-height check
-// will apply, and this test's own real-chain height must be taken into
-// account (or the fixture given a test-only low activation height) at that
-// point, not before.
+// UPDATED (2026-09-23): CheckAuxPowRules() -- the height/policy gate -- IS
+// now spliced into the live path (ContextualCheckBlockHeader(),
+// src/validation.cpp), so this block's acceptance at a tiny regtest height
+// is no longer merely "nothing forbids it yet" -- it is REGTEST's own real,
+// deliberately test-friendly BitAIAuxpowActivationHeight (1, matching
+// BIP34Height's own "always active unless overridden" regtest convention;
+// see kernel/chainparams.cpp) genuinely permitting it as a matter of policy.
+// The real BitAIcoin chain's own activation height (227808) is exercised
+// directly, at its literal value, by the boundary tests further up in this
+// file (check_auxpow_rules_boundary_matches_real_activation_height_exactly
+// etc.) -- not by mining a real chain to that height here, which would not
+// be a reasonable unit-test cost.
 
 namespace auxpow_transport_tests_detail {
 struct AuxPowMinerTestingSetup : public RegTestingSetup {
