@@ -212,11 +212,68 @@ format) and should not be conflated.
   (`if ((nextTargetShifted >> shifts) != nextTarget) nextTarget = powLimit;`), which does not depend
   on this assert. But a debug build would abort on the very first ASERT retarget after activation,
   and copying the assert verbatim would be silently wrong for BitAIcoin's own, intentionally wider,
-  powLimit. **Decision applied in `asert_reference.py`, flagged here for the eventual C++ port to
-  carry forward, not resolved unilaterally as final:** relax the precondition to the property this
-  code actually relies on -- `powLimit >> 240 == 0` (16 bits of multiply headroom, since the
-  fixed-point `factor` is always `< 2*RADIX = 2^17`) -- which BitAIcoin's powLimit satisfies
-  (228 < 240), instead of copying BCH mainnet's tighter, coincidental 224-bit figure verbatim.
+  powLimit.
+
+  **Second pass, arithmetic re-derived and PROVEN rather than trusted (2026-09-23, per explicit
+  follow-up gate before wiring anything into the live block-acceptance path):** the first-pass
+  relaxed precondition above, `powLimit >> 240 == 0`, was itself only reasoned informally
+  ("factor < 2*RADIX = 2^17, so 16 bits of headroom suffices") and was never actually checked against
+  the exact polynomial or the real multiplication semantics. Checked this pass and found **it was off
+  by exactly one bit**:
+  - Read `src/arith_uint256.cpp`'s `operator*=(uint32_t)` directly (the exact overload
+    `refTarget * factor` resolves to, since `factor` is a `uint32_t`): it is plain schoolbook
+    fixed-width 256-bit multiplication that discards the final carry out of the top limb with **no
+    overflow detection whatsoever**. This is the same arithmetic BCHN and Decred's `dcrd` both target
+    for this step -- see below, though, for a real divergence in how each project actually handles it.
+  - Exhaustively searched (not sampled) the full `uint16_t` fractional domain (`contrib/asert_reference.py::_prove_factor_max()`)
+    and confirmed the true maximum `factor` is exactly **131071 = 2^17 - 1**, at `frac=65535`.
+  - Derived the exact boundary (`_prove_powlimit_bound()`): a worst-case **239-bit** `powLimit`
+    (`2^239-1`) times `131071` has bit-length exactly 256 (fits, safe); a worst-case **240-bit**
+    `powLimit` (`2^240-1`) times `131071` has bit-length **257** (does NOT fit -- silently wraps).
+    **The correct, proven bound is `powLimit >> 239 == 0`, not `>> 240`.**
+  - BitAIcoin's real powLimit (228 bits) was never actually at risk either way -- it has 11 bits of
+    real margin under the correct 239-bit bound. What was wrong was the *stated* margin, not
+    BitAIcoin's own value; still, this is exactly the kind of one-bit arithmetic error that must be
+    proven, not asserted from a rule of thumb, before it goes into consensus code. `calculate_asert()`
+    now asserts the corrected `powLimit >> 239 == 0` and separately runs an explicit **checked-
+    arithmetic** simulation of the real fixed-width truncation on every call (computes the product at
+    full Python precision, masks to 256 bits, and asserts the two are equal), so running the file is
+    itself a live proof the precondition holds for whatever `pow_limit` is passed in, not just a
+    paper argument -- the "prefer checked arithmetic... if that gives a clearer invariant" instruction
+    is implemented literally, not just discussed.
+  - **A real design divergence worth carrying into the eventual C++ port, found while building the
+    differential test below:** BCHN's `CalculateASERT` and Decred's `dcrd` (`CalcASERTDiff` in
+    `blockchain/standalone/pow.go`) both use the identical polynomial, but **not** the identical
+    arithmetic. BCHN uses fixed-width `arith_uint256` (the overflow risk above) and relies entirely on
+    its own powLimit being small enough by construction. Decred's Go implementation instead performs
+    this exact multiplication with `math/big.Int` -- genuine arbitrary precision, confirmed by reading
+    `dcrd`'s own source (`nextDiff.Mul(nextDiff, big.NewInt(int64(fracFactor)))`) -- which has *no*
+    fixed-width overflow risk at all, at the cost of a heap-allocating bignum operation in a
+    consensus-hot path (a real cost BCHN's design avoids). BitAIcoin's real powLimit has enough margin
+    that either approach is currently safe, but **the eventual C++ port should pick one of these two
+    designs deliberately** (a precondition-plus-checked-arithmetic assertion in the BCHN style, or a
+    genuinely wider intermediate in the Decred style) rather than silently inheriting BCHN's
+    unchecked-multiply design without the discipline BCHN gets away with only because its own powLimit
+    is conservative by construction.
+
+  **Independent differential validation, not just this port's own algebraic self-consistency:**
+  fetched Decred's real, literal `blockchain/standalone/testdata/asert_test_vectors.json` (saved at
+  `contrib/decred_asert_test_vectors.json`, 1,402 individual test rows across 17 scenarios, retrieved
+  directly via `curl` this pass specifically because the earlier BCHN GitLab CSV fetch had returned
+  HTTP 403 through a summarizing fetch tool -- this file was fetched as raw bytes, not summarized).
+  Decred's `CalcASERTDiff` uses the identical polynomial but a slightly different height-delta
+  convention (no "+1" -- confirmed by reading `dcrd`'s own source, not assumed), so the vectors were
+  run through `calculate_asert()` with the explicit, documented mapping
+  `my_height_diff = (height - startHeight) - 1` to compensate. Result: **1,401 of 1,401 real,
+  applicable upstream vectors matched exactly** (mainnet + testnet params, both safely inside the
+  fixed-width bound; the one remaining row per scenario is each scenario's own height=0 anchor
+  baseline, not a real retarget call, correctly not run; Decred's `simnet` params use a deliberately
+  near-256-bit powLimit that only their arbitrary-precision design supports and were correctly
+  excluded rather than silently forced through the fixed-width port). Also added, per explicit
+  instruction: compact-target (`nBits`) encode/decode boundary round-trip tests (ported line-for-line
+  from `arith_uint256::SetCompact`/`GetCompact`), extreme positive/negative exponent cases, and
+  explicit `target=1` / `target=powLimit` clamping cases -- all in `contrib/asert_reference.py`, all
+  passing. Reproducible: `python3 contrib/asert_reference.py`.
 - **powLimit / clamping behavior, corrected from my first pass:** the ceiling that matters is
   `next_target <= consensus.powLimit` (targets can't get *easier* than the chain-wide floor
   difficulty) -- **not** a floor preventing targets from getting *harder*; there is no consensus
