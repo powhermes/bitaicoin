@@ -138,6 +138,8 @@ BASE_SCRIPTS = [
     'p2p_blockfilters.py',
     'feature_assumevalid.py',
     'feature_auxpow_prune.py',
+    'feature_auxpow_rpc.py',
+    'feature_auxpow_rpc_disabled_chains.py',
     'wallet_taproot.py',
     'feature_bip68_sequence.py',
     'rpc_packages.py',

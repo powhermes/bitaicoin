@@ -1413,3 +1413,501 @@ required changing any of these.
 
 **Next: `createauxblock`/`submitauxblock`**, as their own separate slice, now that this final ASERT
 validation pass is green.
+
+## 10. `createauxblock`/`submitauxblock`: the two-call AuxPoW mining RPC interface (2026-09-24)
+
+The conventional Namecoin/Dogecoin-style merge-mining RPC surface, built as an isolated slice on top
+of the now-frozen AuxPoW/ASERT consensus rules from sec.1-9. No consensus rule, activation height,
+chain ID, or half-life was changed in this slice; one real bug was found and fixed inside the new RPC
+code itself (10.4), and one real ordering bug was found and fixed in the new RPC code's own
+chain-awareness check (10.6) -- neither touches consensus.
+
+### 10.1 RPC schemas
+
+`createauxblock "<address>"` -> object:
+
+| field | type | meaning |
+|---|---|---|
+| `hash` | hex string (64 chars) | child block hash; the parent-chain coinbase's merge-mining commitment must commit to this value |
+| `chainid` | number | `BITAI_AUXPOW_CHAIN_ID` (16969), always |
+| `previousblockhash` | hex string (64 chars) | the active tip this candidate builds on |
+| `coinbasevalue` | number | subsidy + fees, in satoshis |
+| `bits` | hex string (8 chars) | compact target, same convention as `getblocktemplate`'s `bits` |
+| `height` | number | height this candidate would have if accepted |
+| `target` | hex string (64 chars) | full 256-bit target, in the **conventional Namecoin/Dogecoin AuxPoW RPC byte order** (raw internal bytes, hex-encoded with no reversal -- `HexStr(BEGIN(target), END(target))` in those codebases). This is the exact byte-reversal of `getblocktemplate`'s own big-endian/"natural" `target` convention, **never directly equal to it** (fixed 2026-09-24 -- see 10.10). `bits`/`previousblockhash`/`height` still match `getblocktemplate` directly at the same tip.
+
+`submitauxblock "<hash>" "<auxpow_hex>"` -> `bool`: `true` only on real acceptance (including a
+clean duplicate/already-valid resubmission); `false` for a known candidate that the real validation
+pipeline rejects, or a genuinely inconclusive result. Malformed hex/params, an unknown/evicted hash,
+and a disabled/inactive chain each raise a distinct `JSONRPCError` (`RPC_DESERIALIZATION_ERROR` /
+`RPC_INVALID_PARAMETER` / `RPC_MISC_ERROR` respectively) rather than returning `false` -- `false` is
+reserved for "well-formed submission, real validation said no."
+
+No `getauxblock` alias was added; nothing in this slice's own testing (including the RPC-level
+adversarial suite in 10.7) surfaced a need for one.
+
+### 10.2 Candidate cache lifecycle and limits
+
+`AuxBlockCandidateCache` (`src/rpc/auxpow.h`/exercised directly in `src/test/auxpow_rpc_tests.cpp`):
+
+- Bounded at `MAX_CANDIDATES = 30`, FIFO eviction by insertion order once exceeded -- confirmed by a
+  real test inserting 40 entries and checking the oldest 10 are gone while the newest 30 are each
+  still retrievable under their own exact hash/height (`bounded_fifo_eviction`).
+- Entries are immutable, complete snapshots (`shared_ptr<const AuxBlockCandidate>`); two `Get()` calls
+  for the same still-cached hash return the identical underlying object, never a copy
+  (`entries_are_immutable_shared_snapshots`).
+- A candidate is **never** invalidated by a mempool change or by a newer candidate being created for
+  the same tip -- multiple candidates for one tip coexist and each remains independently submittable
+  (`feature_auxpow_rpc.py`: `cand_a`/`cand_b`, mempool changed in between, both still valid until the
+  tip itself moves).
+- Tip-staleness is checked **at submission time**, not by the cache itself (the cache has no chain-state
+  access by design, so it stays simple and unit-testable without a `ChainstateManager`): once the tip
+  advances past `candidate->prev_hash`, `submitauxblock` rejects with a clear `RPC_INVALID_PARAMETER`
+  ("Candidate is stale...").
+- A failed submission (bad proof) does **not** evict or burn the candidate -- a subsequent valid
+  submission for the same hash still succeeds (`feature_auxpow_rpc.py`: `cand_h`).
+- Concurrent access was stress-tested both at the cache level (8 writer + 8 reader threads x 250 ops,
+  `concurrent_insert_and_get_is_safe_and_never_cross_contaminates` -- the checkable invariant being
+  that a returned candidate's own `hash` field always matches the key it was looked up under) and at
+  the real RPC level (4 threads racing `submitauxblock` on one still-current candidate through 4
+  independent connections against the live node -- see 10.7).
+
+### 10.3 Stale-work behavior
+
+A candidate becomes stale the instant the active tip advances past its `prev_hash`, regardless of
+*why* the tip moved (this candidate's own submission, a different candidate's submission, or direct
+mining via `generatetoaddress`/`getblocktemplate`+`submitblock`). Resubmitting a hash whose candidate
+has gone stale always raises `RPC_INVALID_PARAMETER`, even if the auxpow payload would otherwise have
+been perfectly valid -- there is no window in which an already-superseded candidate can still be
+accepted.
+
+### 10.4 Real bug found and fixed: `hashMerkleRoot` never populated by `getBlock()`
+
+`interfaces::BlockTemplate::getBlock()` (the same modern block-template API `generatetoaddress`/
+`generateblock` use) does **not** itself compute a submit-ready `hashMerkleRoot` -- confirmed via a
+real regtest run rejecting the very first end-to-end submission with `bad-txnmrklroot`, not by
+inspection. `generateblock`'s own real code calls `node::RegenerateCommitments(block, chainman)`
+after `getBlock()`, previously assumed (incorrectly) to be needed only because that RPC appends extra
+transactions afterward; the debug evidence here (cached `hashMerkleRoot` was all-zero; a fresh
+`BlockMerkleRoot()` recomputation was a real, different hash) proved it's required even with zero
+extra transactions. Fixed by calling `node::RegenerateCommitments(*pblock, chainman)` immediately
+after `getBlock()` inside `createauxblock`, matching `generateblock`'s own convention exactly.
+
+### 10.5 `include_dummy_extranonce` bug (same family, caught first)
+
+Before the above: a low-height coinbase's BIP34 height push alone can be a single byte (e.g. `OP_6`
+for height 6), one byte short of the real minimum coinbase scriptSig length, causing
+`TestBlockValidity` to reject the template as `bad-cb-length` before this RPC ever returned anything.
+Fixed by passing `include_dummy_extranonce = true` in `BlockCreateOptions`, matching
+`generateblock`'s/`generatetoaddress`'s own already-working use of the same option for the identical
+reason.
+
+### 10.6 Real ordering bug found and fixed: chain-awareness check ran too late in `submitauxblock`
+
+`EnsureAuxPowActiveOrThrow`'s own doc comment states it is meant to be "the one place both
+createauxblock and submitauxblock enforce [chain-awareness/activation], so they can't drift apart" --
+but in the first working version, `submitauxblock` called it only *after* decoding the submitted
+auxpow hex and looking up the candidate. Caught by a real functional test
+(`feature_auxpow_rpc_disabled_chains.py`, run against a `testnet4` node, i.e. an ordinary chain with
+`fBitAIAuxpowEnabled == false`): a malformed-hex probe returned a generic decode error, and a
+well-formed-but-unknown-hash probe returned "Unknown or evicted candidate hash" -- both correctly
+inert (no chain state changes either way), but neither is the specific, actionable "AuxPoW is not
+enabled on this chain" message the design intended, and a real pool integration debugging a
+misconfigured chain would be misled by the wrong message. Fixed by moving the
+`EnsureAuxPowActiveOrThrow` call to run first in `submitauxblock`, before hash parsing, auxpow
+decoding, or the candidate lookup -- now byte-for-byte the same ordering intent as `createauxblock`.
+The original, later check (inside the tip/staleness lock) was kept as-is: it is not redundant, since
+it guards the narrow real window of a reorg crossing back below the activation height between the two
+separate lock acquisitions.
+
+### 10.7 RPC-level adversarial tests (`test/functional/feature_auxpow_rpc.py`, `feature_auxpow_rpc_disabled_chains.py`)
+
+All of the following were run for real against a live regtest (or, where noted, `testnet4`) node, not
+asserted from inspection:
+
+createauxblock before activation/on a disabled chain rejected with a specific message (testnet4);
+submitauxblock on a disabled chain also rejected with the same specific message, checked *before*
+decode/lookup (10.6); valid post-activation candidate returned with all fields correctly typed;
+`chainid == 16969`; payout lands on the exact supplied address (checked on the real accepted
+coinbase, not the unsubmitted template); `coinbasevalue` equals subsidy + real mempool fee exactly;
+`target` (parsed per its own conventional byte order) describes the identical numeric value as `bits`,
+and reversing `target`'s bytes reproduces `getblocktemplate`'s `target` exactly at the same tip (also
+proves item 8: identical nBits for direct vs. aux templates at one tip, 10.10); an older same-tip candidate remains
+submittable after the mempool changes and a newer candidate is created for the same tip; a candidate
+goes stale the instant a different block changes the tip; an unknown/evicted hash is rejected;
+malformed auxpow (non-hex, truncated, trailing garbage, oversized merkle branch) rejected with a clean
+decode error; a proof built for the wrong chain ID (a genuine `tree_size=4` simulated multi-chain
+slot-assignment mismatch -- see the code comment in `build_wrong_chain_id_auxpow` for why a
+`tree_size=1` "wrong chain ID" is not constructible, 10.8) is rejected; a wrong child commitment is
+rejected; a corrupted parent coinbase merkle branch is rejected; a corrupted chain-merkle index is
+rejected; an invalid submission does not burn the candidate and a later valid one for the same hash
+still succeeds; attaching a proof never changes the candidate's own child hash (implicit in every
+accepted-submission assertion, plus a live `CHECK_NONFATAL` invariant in the RPC code itself); four
+threads racing `submitauxblock` on one still-current candidate, each over its own RPC connection,
+never corrupt cache state, never hang, and the tip ends at exactly the candidate's hash (the cache
+remains fully functional immediately afterward).
+
+### 10.8 A real incompatibility found: "wrong chain ID" has no attacker-reachable representation at `tree_size=1`
+
+`CAuxPow` carries no chain-ID field of its own; the real, non-attacker-controlled chain ID is supplied
+by the *caller* of `CAuxPow::Check()` (always `BITAI_AUXPOW_CHAIN_ID`, read from the child block's own
+already-fixed `nVersion`). The only place chain ID enters the proof-side computation at all is
+`GetExpectedMerkleTreeIndex(nonce, chainId, treeSize)`, which for `treeSize == 1` (the only tree size
+this RPC slice's own `createauxblock` ever produces or expects -- a genuinely single-aux-chain
+deployment) collapses to `0` for **any** chain ID. This means a naive "submit a proof built with the
+wrong chain ID" test is byte-for-byte indistinguishable from a valid submission in this slice's normal
+single-chain mode, and is a real, narrow divergence from a fully general Namecoin-style
+multi-chain-tree pool implementation (where a wrong chain ID genuinely produces a different tree
+slot). `feature_auxpow_rpc.py` demonstrates the real, only-way this is observable: hand-constructing a
+`tree_size=4` simulated multi-chain scenario and showing the real validation path (which always uses
+the fixed, correct chain ID) rejects a slot assignment computed for a different one. This is a
+documentation/scope note, not a defect: nothing in the current single-aux-chain design lets an
+external submitter influence chain ID at all, so there is no real attack surface here today, only a
+constraint worth knowing if this RPC is ever extended to a true multi-chain merge-mining tree.
+
+### 10.9 End-to-end functional mining test result
+
+Both the full valid path and the deliberate-rejection path were run against a live regtest node
+end-to-end via the real RPC interface (not internal APIs): `createauxblock` -> construct a parent
+coinbase carrying the real merge-mining commitment (`test_framework/auxpow.py`'s `build_valid_auxpow`,
+independently verified byte-identical to the C++ deserializer) -> mine the **parent** header only
+until it satisfies the returned BitAIcoin target (the parent's own claimed `nBits` is irrelevant, as
+designed) -> serialize the `CAuxPow` -> `submitauxblock` -> **accepted**, and the node's tip became
+exactly the `hash` `createauxblock` had returned. Repeating with a parent header one nonce off the
+solving target (deliberately invalid parent PoW) -> **rejected** (`false`), and the tip did not move.
+Both directions also re-verified inside the full adversarial suite (10.7).
+
+## 11. Compatibility pass (2026-09-24): target byte order, duplicate/stale semantics, `mining_basic.py` root cause
+
+A short, focused follow-up to sec.10, entirely inside `rpc/auxpow.cpp`/`.h` and the fork's own test
+suite -- no consensus, ASERT, activation height, chain ID, or AuxPoW proof validation rule was
+touched.
+
+### 11.1 Real bug fixed: `target` byte order was not Dogecoin/Namecoin-compatible
+
+Sec.10's original implementation returned `target` in the same big-endian/"natural" convention as
+`getblocktemplate` (`arith_uint256::GetHex()`). That is **not** what real Namecoin/Dogecoin-style
+AuxPoW pool software expects: their `createauxblock`/`getauxblock` return
+`HexStr(BEGIN(target), END(target))` -- the raw internal byte representation, hex-encoded with **no**
+reversal, which is the exact byte-reversal of the big-endian display convention. Fixed in
+`createauxblock` (`src/rpc/auxpow.cpp`): convert the compact target to a `uint256` via
+`ArithToUint256()`, then `HexStr()` its raw `begin()`/`end()` bytes directly -- no manual reversal
+needed, since a `uint256`'s raw internal storage already *is* little-endian-relative-to-the-number,
+and `HexStr` never reverses on its own. `bits`, `hash`, `previousblockhash`, and `chainid` (16969) are
+all unchanged.
+
+Regression updated (`feature_auxpow_rpc.py`) to assert the correct relationship explicitly:
+`target_from_auxpow_rpc_hex(cand["target"]) == uint256_from_compact(int(cand["bits"], 16))` (two
+independent derivations of the same numeric target agree), and separately
+`reverse_hex_bytes(cand["target"]) == getblocktemplate(...)["target"]` (**not** direct equality --
+the old, wrong assertion). `test_framework/auxpow.py` gained `target_from_auxpow_rpc_hex()` and
+`reverse_hex_bytes()`; the AuxPoW proof-building helper used throughout the regression
+(`build_and_submit`) now derives its numeric target from `cand["target"]` itself via the corrected
+byte order (previously it silently re-derived from `cand["bits"]` and never actually exercised the
+`target` field's real interpretation).
+
+No nonstandard replacement field was added. `target` means exactly what existing Dogecoin/Namecoin-style
+pool software expects it to mean.
+
+### 11.2 Real contradiction fixed: duplicate-vs-stale, now idempotent-retry semantics
+
+Sec.10's report asserted both "duplicate/already-valid resubmission returns true" and "the candidate's
+`prev_hash` no longer matches the tip once accepted, therefore resubmission is stale" -- genuinely
+contradictory without a special case, as pointed out. Resolved by adding an explicit idempotent-retry
+check to `submitauxblock`, in the same lock scope as (and immediately after) the chain-awareness check,
+**before** the auxpow-hex decode, the candidate-cache lookup, and the stale-`prev_hash` check:
+
+```cpp
+if (const CBlockIndex* existing = chainman.m_blockman.LookupBlockIndex(hash);
+    existing && chainman.ActiveChain().Contains(existing) &&
+    existing->IsValid(BLOCK_VALID_SCRIPTS)) {
+    return true;
+}
+```
+
+(Narrowed further in 11.7, below, before this milestone was frozen -- this original form was too broad.)
+
+Exact, now-consistent behavior:
+- If `hash` is **already a fully-validated block on the active chain** (an earlier call actually
+  succeeded, whether or not its RPC response reached the caller) -> `true`, immediately, regardless of
+  what the resubmitted proof bytes are or whether the original cache entry still exists.
+- Otherwise, if the active tip still equals `candidate.prev_hash` -> normal submission proceeds.
+- Otherwise (tip moved to something else) -> stale error.
+
+This runs deliberately before hash decode/cache lookup so a retry succeeds even after the original
+candidate has been evicted from the (bounded, sec.10.2) cache -- once a hash is genuinely accepted, how
+it was originally submitted no longer matters. The later, narrower duplicate case inside
+`ProcessNewBlock`'s own result (`!new_block && accepted`) is kept as a real, complementary backstop for
+the tighter race where two submissions both pass the idempotent check before either's acceptance
+commits.
+
+Exact tests added (`feature_auxpow_rpc.py`), matching the specification precisely:
+- **A**: valid candidate submitted -> `true`.
+- **B**: the exact same hash/proof immediately resubmitted -> `true` (idempotent retry; the tip has
+  already moved past this candidate's own `prev_hash` at this point, proving the idempotent check runs
+  and wins *before* the stale-prev check).
+- **C**: candidate A created, a *different* block (candidate A's own acceptance) advances the tip,
+  candidate B (A's same-tip sibling, never itself submitted) submitted -> stale error (no idempotent
+  exception applies -- B itself was never accepted).
+- **D**: an invalid proof for a current candidate -> `false`, candidate remains reusable.
+- **E**: a valid proof afterward for that same candidate -> `true`.
+
+The concurrent-submission stress test (sec.10.7) was re-run under this fix: all 4 racing threads
+submitting the identical (hash, proof) pair for a still-current candidate now return `true` (observed
+directly: `results=[True, True, True, True] errors=[]`), where previously only the first would succeed
+and the rest would see a stale error -- a concrete, verified improvement, not merely a theoretical one.
+
+### 11.3 `mining_basic.py` root cause: investigated, reproduced exactly, and fixed (not merely noted)
+
+Reproduced precisely (not inferred): `mining_basic.py`'s "test blockversion" section restarts the node
+with `-blockversion=1337` and asserts `getblocktemplate(...)['version'] == 1337`. Captured via debug
+log at the moment of failure:
+
+| field | value |
+|---|---|
+| height | 201 (tip was 200) |
+| nVersion | 1337 (`0x539`) |
+| bit 8 (`VERSION_AUXPOW`) set? | **yes** (`1337 & 0x100 == 0x100`) |
+| `GetChainId(nVersion)` | 0 |
+| source | 100% node-generated template, **not** manually mutated by the Python test |
+
+`-blockversion=N` (`src/node/miner.cpp`: `pblock->nVersion = gArgs.GetIntArg("-blockversion", ...)`) is
+generic, unmodified upstream code that overwrites `nVersion` verbatim with no masking -- it was never
+written with any bit semantics in mind. `1337` is an arbitrary, memorable constant upstream chose for
+this purely-mechanical "is -blockversion applied verbatim" check; it happens, by coincidence, to have
+bit 8 set with a chain ID of 0, neither matching `BITAI_AUXPOW_CHAIN_ID` (16969). BitAIcoin's own
+`BlockAssembler` self-check (`TestBlockValidity`, gated on `m_options.test_block_validity`) correctly
+classified the resulting template as a malformed AuxPoW header and rejected it as
+`auxpow-wrong-chain-id`.
+
+**Classification: case 1** (per the exact framework given for this investigation) -- an upstream test
+deliberately constructs an arbitrary version number that happens to be invalid under BitAIcoin's
+intentionally-reserved AuxPoW bit semantics (sec.1-2). This is **not** case 2: BitAIcoin's own
+direct-mining path (`ComputeBlockVersion()`) never independently produces a bit-8-set version on its
+own; the only way bit 8 gets set here is the generic `-blockversion` test-only override forcing it,
+which is not organic mining behavior. The production invariant -- **post-227808 direct mining is
+valid, but a direct block must not claim `VERSION_AUXPOW`** -- was not weakened to make this pass; if
+anything, this rejection is that exact invariant working correctly (a real miner who accidentally ran
+with a colliding `-blockversion` in production would, correctly, have their block rejected by every
+peer the same way).
+
+**Fix** (`test/functional/mining_basic.py`, the fork's own copy of this stock test): replaced the
+magic constant with `1337 & ~(1 << 8)` (`1081`, bit 8 cleared, asserted explicitly in-test), with a
+comment explaining the fork-specific reason. This preserves the test's actual intent (proving
+`-blockversion` is applied verbatim) without colliding with the reserved bit. Verified: `mining_basic.py`
+now passes end-to-end, all sections, not just the one line. `mining_mainnet.py`'s own
+`block.nVersion = 0x20000000` was checked too -- bit 8 clear regardless, and that test runs on
+`chain=main` where `fBitAIAuxpowEnabled` is `false` by design anyway, so no change was needed there.
+
+### 11.4 A second, unrelated real bug caught while verifying this pass: a data race in this session's own new C++ test
+
+While re-running the full C++ suite multiple times (rather than asserting green from a single pass --
+see 11.5), `auxpow_rpc_tests/concurrent_insert_and_get_is_safe_and_never_cross_contaminates`
+intermittently (roughly 1-in-3 runs) crashed with a real memory access violation, not a logical
+assertion failure. Root cause: the test's 8 writer threads each called the shared `m_rng.rand256()`
+(`FastRandomContext`, from `BasicTestingSetup`) directly inside their thread lambdas to generate a
+`prev_hash` argument -- `FastRandomContext` has no internal synchronization of its own (it mutates a
+bare `ChaCha20` counter/state), so this was a genuine, unsynchronized data race in the **test's own
+scaffolding**, not in `AuxBlockCandidateCache` (which locks its own `m_mutex` correctly on every
+access, and was never implicated). Fixed by pre-generating all `prev_hash` values single-threaded,
+alongside the hashes that were already pre-generated correctly, before launching any threads. Verified
+by running the isolated test 30/30 clean and the full suite 5/5 clean afterward (previously, this exact
+race would be expected to reproduce within a handful of runs).
+
+### 11.5 Functional mining regression set
+
+Run for real, after the above fixes, not asserted from the sec.10 baseline: `mining_basic.py` (fixed,
+now green end-to-end), `feature_auxpow_rpc.py` (green, including the new byte-order and A-E
+duplicate/idempotent tests), `feature_auxpow_rpc_disabled_chains.py` (green), `feature_auxpow_prune.py`
+(green, no collateral regression). Full C++ suite run 5 times in a row: 811/811 test cases, 0
+regressions, 0 flakes (post-11.4 fix). The full (non-extended) functional `test_runner.py -j8` regression
+sweep was also launched; see 11.6 for its result.
+
+### 11.6 Verified for real
+
+**Full functional `test_runner.py -j8` sweep (270 scripts, non-extended `BASE_SCRIPTS` set)**: 6
+failures on the first pass -- `feature_block.py`, `feature_fee_estimation.py`, `feature_taproot.py`,
+`mempool_ephemeral_dust.py`, `p2p_opportunistic_1p1c.py`, `wallet_conflicts.py`. None of these touch
+AuxPoW, mining, versionbits, or anything this compatibility pass changed. Each was re-run individually,
+in isolation, immediately afterward: **all 6 passed cleanly**, with no code change. This is the
+signature of parallel-execution resource contention (port/RPC-timeout races under 8-way concurrent
+`bitcoind` instances on one machine), not a real regression -- confirmed by reproduction, not asserted.
+`feature_auxpow_rpc.py`, `feature_auxpow_rpc_disabled_chains.py`, `feature_auxpow_prune.py`, and
+`mining_basic.py` were **not** among the failures; all passed in the same parallel sweep.
+
+## 12. Final RPC-layer correction (2026-09-24): idempotent shortcut narrowed to real AuxPoW blocks, lower-concurrency confirmation
+
+A last, focused fix to the sec.11.2 idempotent-retry check, plus the deeper functional-regression
+confidence the sec.11.6 `-j8` result asked for. No consensus, ASERT, chain ID, activation height, or
+target encoding was touched.
+
+### 12.1 Real gap found and fixed: the idempotent shortcut was too broad
+
+Sec.11.2's check returned `true` for *any* hash that was known, on the active chain, and
+`BLOCK_VALID_SCRIPTS` -- but after AuxPoW activation, an ordinary **direct-mined** BitAIcoin block
+satisfies all three of those conditions too. `submitauxblock <direct-block-hash> <anything>` could have
+incorrectly returned `true` for a block that was never an AuxPoW submission at all. Fixed by requiring
+the existing block to genuinely **be** an AuxPoW block on this chain, using the same shared helper the
+compact-block gates already use (sec.7), plus an explicit height floor:
+
+```cpp
+if (const CBlockIndex* existing = chainman.m_blockman.LookupBlockIndex(hash);
+    existing && chainman.ActiveChain().Contains(existing) &&
+    existing->IsValid(BLOCK_VALID_SCRIPTS) &&
+    existing->nHeight >= params.BitAIAuxpowActivationHeight &&
+    IsRealAuxpow(params.fBitAIAuxpowEnabled, existing->nVersion)) {
+    return true;
+}
+```
+
+The bounded-cache independence from sec.11.2 is preserved unchanged: this check still runs before the
+candidate-cache lookup, so idempotency survives cache eviction regardless.
+
+Exact tests added (`feature_auxpow_rpc.py`), matching the specification precisely:
+- **A**: an accepted AuxPoW block's hash + the same proof -> `true`.
+- **B**: that same accepted AuxPoW block's hash + a malformed/irrelevant proof (`"not_hex_at_all"`,
+  then a structurally-truncated `"aabbcc"`) -> still `true` in both cases -- the idempotent check runs
+  *before* the auxpow-hex decode, so the already-valid active AuxPoW block is authoritative for the
+  retry regardless of what was resubmitted.
+- **C**: an accepted, post-activation, **direct-mined** block's hash + an arbitrary well-formed AuxPoW
+  proof -> does **not** return `true` via the shortcut (`IsRealAuxpow` is false for its real `nVersion`);
+  falls through to the normal candidate lookup and fails as `"Unknown or evicted"`, since this hash was
+  never an outstanding AuxPoW candidate.
+- **D**: the genesis block's hash (height 0, pre-activation on regtest) -> also never qualifies, rejected
+  the same way -- the explicit height floor rejects it before `IsRealAuxpow` is even consulted.
+
+The full concurrent-submission race (sec.10.7/11.2) was re-run after this narrowing and still returns
+`results=[True, True, True, True]` -- the fix removes a false-positive class, not the legitimate
+idempotent path.
+
+### 12.2 Confirmed unchanged (as instructed)
+
+`target` byte order (sec.11.1): `reverse_hex_bytes(createauxblock.target) == getblocktemplate.target`,
+and `target_from_auxpow_rpc_hex(createauxblock.target) == uint256_from_compact(bits)` -- both
+re-verified green, untouched. `mining_basic.py`'s disposition (sec.11.3, `1337 & ~(1 << 8) == 1081`) --
+unchanged, re-verified green.
+
+### 12.3 Lower-concurrency functional regression confirmation
+
+Sec.11.6's `-j8` sweep had 6 failures that all passed individually in isolation -- suggestive but not
+conclusive on its own. Re-run at lower concurrency for real confirmation, not asserted:
+
+| concurrency | scripts passed | skipped | failed | wall runtime |
+|---|---|---|---|---|
+| `-j8` (sec.11.6) | 264 | 21 | 6 (all reproduced clean individually) | 195 s |
+| `-j2` | 267 | 21 | 0 | 843 s |
+| `-j1` | 267 | 21 | 0 | 1686 s |
+
+At both `-j2` and `-j1`: **267 scripts passed, 21 skipped (pre-existing, environment-gated -- USDT/IPC/ZMQ
+support, backwards-compatibility binaries, bench binary, etc., unrelated to this fork), 0 failed**,
+including `wallet_conflicts.py` (one of the `-j8` casualties, taking 36 s at `-j2` and 48 s at `-j1`
+instead of racing against 7 other concurrent node instances). Identical clean result at both
+concurrency levels, with zero parallelism at `-j1`, is as strong a confirmation as this machine can
+give: the `-j8` failures were exactly what sec.11.6 suspected -- parallel-execution resource contention,
+not a real regression, and not related to anything in this fork's AuxPoW work.
+
+Also re-run and green at this point: `feature_auxpow_rpc.py` (including the new sec.12.1 A-D tests),
+`feature_auxpow_rpc_disabled_chains.py`, `feature_auxpow_prune.py`, `mining_basic.py`, and the full C++
+suite 5 times in a row (811/811, 0 regressions, 0 flakes).
+
+**Scope discipline confirmed**: no Stratum, pool accounts, share accounting, PPS/PPLNS, payouts,
+miner dashboard, Bitcoin-node orchestration, production pool, `getauxblock` alias, or ZMQ notification
+was built. Output is the two RPCs plus their cache, nothing more.
+
+**This closes the createauxblock/submitauxblock milestone -- frozen.**
+
+## 13. Frozen-interface bug found and fixed: `createauxblock` hung indefinitely on a chain in IBD (2026-09-24)
+
+Found by the merge-mining coordinator integration effort (`contrib/merge_mining_coordinator/`), the
+very first external consumer to call `createauxblock` as the truly first RPC against a virgin chain --
+every prior test in sec.1-12 always mined warm-up blocks first, which masked this completely. Narrowly
+scoped: no consensus, ASERT, chain ID, activation height, target encoding, candidate cache, stale
+semantics, idempotent semantics, or AuxPoW validation was changed.
+
+**Root cause**: `createauxblock` uniquely omitted the explicit `/*cooldown=*/false` argument to
+`Mining::createNewBlock()`, inheriting its default IBD-wait behavior -- every other real call site
+(`generateblock`, `getblocktemplate`, `generatetoaddress`'s underlying path, all in `rpc/mining.cpp`)
+already passes `cooldown=false` explicitly. With the default `cooldown=true`,
+`node::interfaces.cpp`'s own `while (chainman().IsInitialBlockDownload()) { waitTipChanged(...); }` loop
+runs before ever returning a template -- and a virgin chain (ancient genesis timestamp, zero blocks) is
+permanently "in IBD" by that heuristic, so the loop never exits. Confirmed by real reproduction, not
+inspection: process sampling of the hung `bitaicoind` showed the RPC worker thread blocked inside
+exactly this loop, and the entire RPC server (even `getblockcount`) was unresponsive for as long as the
+process ran, since the blocked worker thread held `cs_main`.
+
+**Why a plain `cooldown=false` workaround was rejected**: that alone would silently hand out mining
+work from an actually-unsynced real production node. A pool-facing RPC must not require an unrelated
+warm-up block before it can produce the first valid AuxPoW block on regtest, but it also must not
+silently serve work from a real BitAIcoin node that hasn't actually caught up.
+
+**The fix** (`src/rpc/auxpow.cpp`, inside `createauxblock`, after `EnsureAuxPowActiveOrThrow` -- chain
+awareness must still be reported first, see below):
+```cpp
+if (chainman.GetParams().GetChainType() != ChainType::REGTEST && miner.isInitialBlockDownload()) {
+    throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+        CLIENT_NAME " is in initial sync and waiting for blocks...");
+}
+```
+followed by `miner.createNewBlock(options, /*cooldown=*/false)` unconditionally once this readiness
+check has passed. `cooldown=false` only prevents `createNewBlock` from waiting internally; this
+explicit check is what decides whether the RPC may produce work at all -- `createNewBlock`'s own
+cooldown loop is never again the thing implementing RPC policy.
+
+A real subtlety caught before shipping, not by inspection: `getblocktemplate`'s own established pattern
+exempts `miner.isTestChain()` chains from this gate, but that generic helper means "chain type != MAIN"
+(`kernel/chainparams.h`) -- true for `ChainType::BITAICOIN` itself, since BitAIcoin's real production
+chain is deliberately not "MAIN". Reusing `isTestChain()` verbatim here would have silently exempted
+real BitAIcoin production nodes from the IBD gate too, defeating the entire point. Fixed by checking
+`GetChainType() != ChainType::REGTEST` explicitly instead -- the only chain type where "virgin chain, no
+warm-up block, must work immediately" is the actually-intended behavior.
+
+A second ordering subtlety, also caught by a real regression (not by inspection): the readiness check
+must run *after* `EnsureAuxPowActiveOrThrow`, not before it -- `feature_auxpow_rpc_disabled_chains.py`
+(a `testnet4` node, itself also in IBD) failed when the readiness check ran first, since it received
+the generic IBD rejection instead of the specific "AuxPoW is not enabled on this chain" message. Fixed
+by moving the readiness check inside the same lock scope, immediately after the chain-awareness check,
+mirroring the identical ordering principle already established for `submitauxblock` (sec.10.6): "this
+chain doesn't support AuxPoW at all" must always be reported before any other, less fundamental
+rejection reason.
+
+**Production behavior**: a real (non-`REGTEST`) BitAIcoin node still in IBD fails fast with
+`RPC_CLIENT_IN_INITIAL_DOWNLOAD` (-10) -- confirmed via a real `-chain=bitaicoin -connect=0 -listen=0`
+node (a real `ChainType::BITAICOIN` node that can never leave IBD by construction): rejected in ~1ms,
+never hangs, RPC server stays fully responsive. In practice, at any height reachable in a test
+environment, `EnsureAuxPowActiveOrThrow`'s own fixed, frozen activation-height check (227808, not
+test-overridable) fires first with `RPC_MISC_ERROR` (-1, "not active yet") -- this is expected and
+correct (chain-awareness ordering, above), and is itself proof the RPC never hangs on the real chain
+type either. The `-10` code path only becomes reachable once a real node's own locally-verified height
+approaches 227808 while still separately in IBD (e.g. resyncing from scratch) -- constructing that
+exact scenario would require processing 227808+ real blocks, impractical in any test harness, and is
+documented honestly as such rather than papered over (`test/functional/feature_auxpow_createauxblock_ibd.py`).
+
+**Test behavior**: a virgin `REGTEST` node (height 0, no wallet, no warm-up block) returns a real
+`createauxblock` candidate for height 1 immediately (confirmed: ~1ms, not the prior infinite hang), and
+the merge-mining coordinator's own `create_job()`/`submit_parent_solution()` successfully mine and
+submit that exact first-ever block end to end, advancing the chain to height 1.
+
+**No consensus behavior changed.**
+
+### 13.1 New regression: `test/functional/feature_auxpow_createauxblock_ibd.py`
+
+A standalone script (documented reason it is not run via `test_runner.py`: `BitcoinTestFramework`'s
+`self.chain` mechanism has no way to select `ChainType::BITAICOIN`, since -- unlike
+regtest/signet/testnet/testnet4 -- no dedicated `-bitaicoin` boolean CLI flag was ever registered in
+`src/chainparamsbase.cpp`, only the generic `-chain=bitaicoin` argument; this is a real, pre-existing,
+orthogonal harness gap, not something this fix papers over). Proves, against real running nodes:
+- Virgin regtest: `initialblockdownload` genuinely `true` beforehand (proving the exemption does real
+  work, not a no-op); `createauxblock` succeeds immediately; height is exactly 1; the coordinator mines
+  and submits that exact first block; tip becomes exactly that hash.
+- Real `ChainType::BITAICOIN`, permanent IBD (no peers): fast, correct rejection (~1ms); RPC server
+  fully responsive to `getblockcount`/`getblockchaininfo` immediately afterward (proving the original
+  bug's "whole node becomes unusable" symptom, not just one hung call, is also fixed).
+
+### 13.2 Full regression re-run after this fix
+
+`feature_auxpow_rpc.py`, `feature_auxpow_rpc_disabled_chains.py`, `feature_auxpow_prune.py`,
+`mining_basic.py`: all green, including the ordering-sensitive `disabled_chains` case that exposed the
+readiness-vs-chain-awareness ordering bug above. Full C++ suite run 5 times in a row: 811/811, 0
+regressions.
+
+**Resuming the merge-mining coordinator milestone from exactly where it stopped.**

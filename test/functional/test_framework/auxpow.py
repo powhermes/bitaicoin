@@ -32,6 +32,26 @@ VERSION_RESERVED_MASK = 0x0000FE00
 BITAI_AUXPOW_CHAIN_ID = 16969  # 0x4249, "BI"
 
 
+def reverse_hex_bytes(hex_str):
+    """Reverses the BYTE order of a hex string (not the string's characters)
+    -- e.g. 'aabbcc' -> 'ccbbaa'. Converts between the conventional
+    Namecoin/Dogecoin createauxblock "target" byte order (raw internal
+    bytes, hex-encoded with no reversal) and the big-endian/"natural"
+    convention getblocktemplate's own "target" field uses (fixed
+    2026-09-24, docs/AUXPOW_MILESTONE.md sec.10.1/10.8 -- the two are exact
+    byte-reversals of each other, never directly equal)."""
+    return bytes.fromhex(hex_str)[::-1].hex()
+
+
+def target_from_auxpow_rpc_hex(hex_str):
+    """Parses createauxblock's own "target" field -- conventional
+    Namecoin/Dogecoin AuxPoW RPC byte order, i.e. HexStr(BEGIN(target),
+    END(target)) in those codebases -- into the actual numeric target
+    value. Equivalent to, and independently cross-checked against,
+    uint256_from_compact() applied to the same candidate's "bits" field."""
+    return int.from_bytes(bytes.fromhex(hex_str), "little")
+
+
 def get_base_version(nVersion):
     return nVersion % VERSION_AUXPOW
 

@@ -11,6 +11,7 @@
  * headers for everything under src/rpc/ */
 class CRPCTable;
 
+void RegisterAuxPowRPCCommands(CRPCTable&);
 void RegisterBlockchainRPCCommands(CRPCTable &tableRPC);
 void RegisterFeeRPCCommands(CRPCTable&);
 void RegisterMempoolRPCCommands(CRPCTable&);
@@ -25,6 +26,7 @@ void RegisterTxoutProofRPCCommands(CRPCTable&);
 
 static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
 {
+    RegisterAuxPowRPCCommands(t);
     RegisterBlockchainRPCCommands(t);
     RegisterFeeRPCCommands(t);
     RegisterMempoolRPCCommands(t);

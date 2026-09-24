@@ -78,9 +78,28 @@ class MiningTest(BitcoinTestFramework):
         assert_equal(mining_info['currentblockweight'], DEFAULT_BLOCK_RESERVED_WEIGHT)
 
         self.log.info('test blockversion')
-        self.restart_node(0, extra_args=[f'-mocktime={t}', '-blockversion=1337'])
+        # Upstream Bitcoin Core uses the literal 1337 here as an arbitrary,
+        # recognizable -blockversion value. On BitAIcoin, bit 8 of nVersion
+        # (VERSION_AUXPOW) and bits 16-31 (the AuxPoW chain ID) are
+        # intentionally reserved (docs/AUXPOW_MILESTONE.md sec.1-2), and 1337
+        # (0x539) happens to have bit 8 set with a chain ID of 0 -- neither
+        # matching BITAI_AUXPOW_CHAIN_ID (16969). -blockversion applies the
+        # value verbatim (src/node/miner.cpp, unmodified upstream code, no
+        # AuxPoW-aware masking), so the resulting template is correctly
+        # rejected by CheckAuxPowRules as auxpow-wrong-chain-id -- this is
+        # the intentionally-reserved-bit invariant working exactly as
+        # designed, not a bug in BitAIcoin's own mining path (confirmed via a
+        # real reproduction: a 100% node-generated, non-mutated template at
+        # height 201, nVersion=1337, bit 8 set, GetChainId()==0; see
+        # docs/AUXPOW_MILESTONE.md sec.10 for the full writeup). Use a
+        # different arbitrary constant here that doesn't collide with the
+        # reserved bit, to test the same "-blockversion is applied verbatim"
+        # behavior this test means to check.
+        test_blockversion = 1337 & ~(1 << 8)  # 1081: 1337 with bit 8 (VERSION_AUXPOW) cleared
+        assert test_blockversion & (1 << 8) == 0
+        self.restart_node(0, extra_args=[f'-mocktime={t}', f'-blockversion={test_blockversion}'])
         self.connect_nodes(0, 1)
-        assert_equal(1337, self.nodes[0].getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)['version'])
+        assert_equal(test_blockversion, self.nodes[0].getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)['version'])
         self.restart_node(0, extra_args=[f'-mocktime={t}'])
         self.connect_nodes(0, 1)
         assert_equal(VERSIONBITS_TOP_BITS + (1 << VERSIONBITS_DEPLOYMENT_TESTDUMMY_BIT), self.nodes[0].getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)['version'])
