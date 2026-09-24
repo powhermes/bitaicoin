@@ -6,6 +6,7 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <pow.h>
+#include <test/data/asert_bchn_vectors.h>
 #include <test/util/random.h>
 #include <test/util/common.h>
 #include <test/util/setup_common.h>
@@ -626,6 +627,328 @@ BOOST_AUTO_TEST_CASE(compute_asert_target_compact_roundtrip_vectors)
             BOOST_CHECK(roundTripped > 0);
         }
     }
+}
+
+/* --- Official BCH/BCHN aserti3-2d vector gate (docs/AUXPOW_MILESTONE.md
+ * sec.9) ---
+ *
+ * The C++ ComputeASERTTarget() implementation is now consensus code and
+ * deserves its own independent gate -- NOT merely a comparison against
+ * contrib/asert_reference.py (our own prior Python work). These 14,000 rows
+ * are BCH/BCHN's OWN real, published test vectors (test_vectors/aserti3-2d/
+ * run01 through run12, bitcoin-cash-node/bchn-sw/qa-assets on GitLab --
+ * fetched directly via the GitLab API's raw-file endpoint on 2026-09-24,
+ * transcribed into src/test/data/asert_bchn_vectors.h by a one-time
+ * mechanical conversion script, not retyped by hand), covering: steady
+ * schedule at powLimit/an arbitrary target/the minimum target (run01-03);
+ * sustained target-easing and target-hardening via repeated half-life jumps
+ * (run04-05); realistic randomized solvetimes for stable/up-ramping/
+ * down-ramping hashrate (run06-08); extreme height near INT32_MAX and near
+ * INT64_MAX with extreme time near INT32_MAX (run09-10); negative time
+ * diffs, including a large sustained negative run (run11-12, the latter
+ * 10,000 consecutive blocks each arriving before the previous one -- a real
+ * stress test of the floor clamp under sustained pressure). Uses BCH
+ * mainnet's OWN real consensus parameters (powLimit
+ * 0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+ * targetSpacing 600, halfLife 172800 -- 2 days, BCH's own real production
+ * value, NOT BitAIcoin's frozen 21600) -- this test proves the ARITHMETIC
+ * itself is correct, independent of and prior to BitAIcoin's own changed
+ * half-life parameterization (proven separately, against
+ * contrib/asert_reference.py, in asert_bitaicoin_halflife_vectors_test
+ * below). */
+BOOST_AUTO_TEST_CASE(asert_official_bchn_vectors_test)
+{
+    const arith_uint256 bchMainnetPowLimit = UintToArith256(
+        uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"});
+    constexpr int64_t bchTargetSpacing = 600;
+    constexpr int64_t bchHalfLife = 172800; // BCH's own real 2-day half-life -- NOT BitAIcoin's
+
+    size_t checked = 0;
+    for (const auto& v : BCHN_ASERT_VECTORS) {
+        arith_uint256 refTarget;
+        refTarget.SetCompact(v.anchor_nbits);
+        const arith_uint256 result = ComputeASERTTarget(refTarget, bchTargetSpacing, v.time_diff,
+                                                          v.height_diff, bchMainnetPowLimit, bchHalfLife);
+        const uint32_t resultBits = result.GetCompact();
+        BOOST_CHECK_MESSAGE(resultBits == v.expected_nbits,
+                             strprintf("%s: anchor_nbits=0x%08x height_diff=%d time_diff=%d -- "
+                                       "expected nBits=0x%08x, got 0x%08x",
+                                       v.run, v.anchor_nbits, v.height_diff, v.time_diff,
+                                       v.expected_nbits, resultBits));
+        ++checked;
+    }
+    BOOST_CHECK_EQUAL(checked, size_t{14000}); // sanity: the whole real vector set actually ran, not a truncated subset
+}
+
+/* A handful of specific, NAMED-property vectors from BCHN's own
+ * src/test/pow_tests.cpp::calculate_asert_test (the inline C++ table, as
+ * opposed to the qa-assets data files above) -- ported because they target
+ * specific, real, hard-to-accidentally-cover edge cases the qa-assets runs
+ * don't happen to hit: an overflow-detection-defeating refTarget, an exact
+ * powLimit-clamp boundary, and exact-multiple-of-halflife doubling/halving
+ * checks. Same BCH mainnet parameters as above. */
+BOOST_AUTO_TEST_CASE(asert_official_bchn_named_property_vectors_test)
+{
+    const arith_uint256 powLimit = UintToArith256(
+        uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"});
+    constexpr int64_t spacing = 600;
+    constexpr int64_t halfLife = 172800;
+    const uint32_t powLimitBits = powLimit.GetCompact();
+    // BCHN's own test convention: every call in this test adds this fixed
+    // 600s to its timeDiff argument ("we assume the parent is ideally
+    // spaced in time before the reference block") -- reproduced exactly,
+    // including in the doubling/halving/ramp/overflow sequence below, where
+    // omitting it (an error caught before this test was ever run, not
+    // after) would land the "two days ahead" case 600 seconds short of an
+    // exact half-life multiple and break the exact-doubling property.
+    constexpr int64_t parentTimeDiff = 600;
+    const arith_uint256 initialTarget = powLimit >> 4;
+
+    // Steady: a block landing exactly on schedule leaves the target unchanged.
+    arith_uint256 nextTarget = ComputeASERTTarget(initialTarget, spacing, parentTimeDiff + 600, 1, powLimit, halfLife);
+    BOOST_CHECK_EQUAL(nextTarget, initialTarget);
+
+    // A block arriving in half the expected time makes the next target harder.
+    nextTarget = ComputeASERTTarget(initialTarget, spacing, parentTimeDiff + 600 + 300, 2, powLimit, halfLife);
+    BOOST_CHECK(nextTarget < initialTarget);
+
+    // A block that makes up the prior shortfall restores the target to initial exactly.
+    arith_uint256 prevTarget = nextTarget;
+    nextTarget = ComputeASERTTarget(initialTarget, spacing, parentTimeDiff + 600 + 300 + 900, 3, powLimit, halfLife);
+    BOOST_CHECK(nextTarget > prevTarget);
+    BOOST_CHECK_EQUAL(nextTarget, initialTarget);
+
+    // Two days (one half-life) ahead of schedule doubles the target (halves
+    // the difficulty); two days behind halves the target again, back to
+    // initialTarget.
+    prevTarget = nextTarget;
+    nextTarget = ComputeASERTTarget(prevTarget, spacing, parentTimeDiff + 288 * 1200, 288, powLimit, halfLife);
+    BOOST_CHECK_EQUAL(nextTarget, prevTarget * 2);
+
+    prevTarget = nextTarget;
+    nextTarget = ComputeASERTTarget(prevTarget, spacing, parentTimeDiff + 288 * 0, 288, powLimit, halfLife);
+    BOOST_CHECK_EQUAL(nextTarget, prevTarget / arith_uint256{2});
+    BOOST_CHECK_EQUAL(nextTarget, initialTarget);
+
+    // Ramp from initialTarget up to powLimit -- exactly 4 doublings (initialTarget = powLimit >> 4).
+    uint32_t next_nBits = 0;
+    for (int k = 0; k < 3; ++k) {
+        prevTarget = nextTarget;
+        nextTarget = ComputeASERTTarget(prevTarget, spacing, parentTimeDiff + 288 * 1200, 288, powLimit, halfLife);
+        BOOST_CHECK_EQUAL(nextTarget, prevTarget * 2);
+        BOOST_CHECK(nextTarget < powLimit);
+        next_nBits = nextTarget.GetCompact();
+        BOOST_CHECK(next_nBits != powLimitBits);
+    }
+    prevTarget = nextTarget;
+    nextTarget = ComputeASERTTarget(prevTarget, spacing, parentTimeDiff + 288 * 1200, 288, powLimit, halfLife);
+    BOOST_CHECK_EQUAL(nextTarget, prevTarget * 2);
+    BOOST_CHECK_EQUAL(nextTarget.GetCompact(), powLimitBits);
+
+    // Fast periods cannot push the target beyond powLimit even under an
+    // input (512 days ahead) that would overflow a naive uint256 multiply.
+    nextTarget = ComputeASERTTarget(prevTarget, spacing, parentTimeDiff + 512 * 144 * 600, 0, powLimit, halfLife);
+    BOOST_CHECK_EQUAL(nextTarget.GetCompact(), powLimitBits);
+
+    // Sustained slow periods (~446 days worth of blocks) bring powLimit
+    // itself all the way down to the floor of 1 -- no offset here, matching
+    // the source exactly.
+    nextTarget = ComputeASERTTarget(powLimit, spacing, 0, 2 * (256 - 33) * 144, powLimit, halfLife);
+    BOOST_CHECK_EQUAL(nextTarget.GetCompact(), arith_uint256{1}.GetCompact());
+
+    const arith_uint256 FUNNY_REF_TARGET = UintToArith256(
+        uint256{"000000008000000000000000000fffffffffffffffffffffffffffffffffffff"});
+    const arith_uint256 SINGLE_300_TARGET = UintToArith256(
+        uint256{"00000000ffb1ffffffffffffffffffffffffffffffffffffffffffffffffffff"});
+
+    struct CalcVec { arith_uint256 refTarget; int64_t timeDiff; int64_t heightDiff; uint32_t expectedBits; };
+    const arith_uint256 one{1};
+    const std::vector<CalcVec> vecs = {
+        {powLimit, 0, 2 * 144, 0x1c7fffff},
+        {powLimit, 0, 4 * 144, 0x1c3fffff},
+        {powLimit >> 1, 0, 2 * 144, 0x1c3fffff},
+        {powLimit >> 2, 0, 2 * 144, 0x1c1fffff},
+        {powLimit >> 3, 0, 2 * 144, 0x1c0fffff},
+        {powLimit, 0, 2 * (256 - 34) * 144, 0x01030000},
+        {powLimit, 0, 2 * (256 - 34) * 144 + 119, 0x01030000},
+        {powLimit, 0, 2 * (256 - 34) * 144 + 120, 0x01020000},
+        {powLimit, 0, 2 * (256 - 33) * 144 - 1, 0x01020000},
+        {powLimit, 0, 2 * (256 - 33) * 144, 0x01010000},
+        {powLimit, 0, 2 * (256 - 32) * 144, 0x01010000},
+        {one, 0, 2 * (256 - 32) * 144, 0x01010000},
+        {powLimit, 2 * (512 - 32) * 144, 0, powLimitBits},
+        {one, (512 - 64) * 144 * 600, 0, powLimitBits},
+        {powLimit, 300, 1, 0x1d00ffb1},
+        {FUNNY_REF_TARGET, 600 * 2 * 33 * 144, 0, powLimitBits}, // confuses any overflow-detection-by-inspecting-result attempt
+        {one, 600 * 2 * 256 * 144, 0, powLimitBits}, // overflow to exactly 2^256
+    };
+    for (const auto& v : vecs) {
+        // BCHN's own test adds a fixed 600s parent_time_diff to every vector's
+        // timeDiff (its own convention for "the anchor's parent is ideally
+        // spaced before the anchor") -- reproduced exactly.
+        const arith_uint256 result = ComputeASERTTarget(v.refTarget, spacing, 600 + v.timeDiff,
+                                                          v.heightDiff, powLimit, halfLife);
+        BOOST_CHECK_MESSAGE(result.GetCompact() == v.expectedBits,
+                             strprintf("refTarget=%s timeDiff=%d heightDiff=%d -- expected 0x%08x, got 0x%08x",
+                                       v.refTarget.ToString(), v.timeDiff, v.heightDiff,
+                                       v.expectedBits, result.GetCompact()));
+    }
+    // The SINGLE_300_TARGET vector separately, since it checks the exact
+    // TARGET (not just compact nBits) to confirm the clamp lands precisely.
+    {
+        const arith_uint256 result = ComputeASERTTarget(powLimit, spacing, 600 + 300, 1, powLimit, halfLife);
+        BOOST_CHECK_EQUAL(result, SINGLE_300_TARGET);
+    }
+}
+
+/* Substantial deterministic set of BitAIcoin's OWN 21600s (6-hour) half-life
+ * inputs, differential-tested against the already-validated
+ * contrib/asert_reference.py -- the second half of this section's gate:
+ * official BCH vectors (above) prove the ARITHMETIC; these prove BitAIcoin's
+ * CHANGED half-life parameterization specifically. Generated by running the
+ * Python reference directly (not hand-computed) across a spread of
+ * height/time combinations using BitAIcoin's real powLimit/spacing/half-life. */
+BOOST_AUTO_TEST_CASE(asert_bitaicoin_halflife_vectors_test)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::BITAICOIN);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    const arith_uint256 powLimit = UintToArith256(params.powLimit);
+    BOOST_REQUIRE_EQUAL(params.BitAIASERTHalfLife, 21600);
+    BOOST_REQUIRE_EQUAL(params.nPowTargetSpacing, 600);
+
+    struct BaiVec { int shift; int64_t heightDiff; int64_t timeDiff; const char* expectedTargetHex; };
+    // clang-format off
+    const std::vector<BaiVec> vecs = {
+        // shift, heightDiff, timeDiff, expectedTarget -- each value produced by
+        // ACTUALLY RUNNING contrib/asert_reference.py::calculate_asert() with
+        // BitAIcoin's real powLimit
+        // (0000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffff),
+        // spacing 600, halfLife 21600, then transcribed verbatim -- not
+        // hand-computed. (A first draft of this table used fabricated
+        // placeholder hex values while the real script call was still
+        // pending; caught before this test was ever run, not after -- see
+        // docs/AUXPOW_MILESTONE.md sec.9 for the disclosure.)
+        {4, 0, 600, "00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},   // exactly on schedule -> unchanged
+        {4, 1, 1200, "00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},  // exactly on schedule -> unchanged
+        {4, 10, 300, "00000000d1267fffffffffffffffffffffffffffffffffffffffffffffffffff"},  // ahead of schedule -> harder (smaller)
+        {4, 10, 6600, "00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}, // exactly on schedule -> unchanged
+        {4, 100, 60000, "00000000fb217fffffffffffffffffffffffffffffffffffffffffffffffffff"}, // slightly behind -> slightly easier
+        {4, 100, 30000, "000000005fe33fffffffffffffffffffffffffffffffffffffffffffffffffff"}, // well ahead -> notably harder
+        {4, 100, 0, "00000000249ebfffffffffffffffffffffffffffffffffffffffffffffffffff"},     // far ahead (100 blocks, zero elapsed time) -> much harder
+        {2, 0, -600, "00000003d965ffffffffffffffffffffffffffffffffffffffffffffffffffff"},    // negative timeDiff -> harder still
+        {8, 0, -6000, "000000000cf24fffffffffffffffffffffffffffffffffffffffffffffffffff"},   // large negative timeDiff from an already-small refTarget -> harder again
+    };
+    // clang-format on
+    for (const auto& v : vecs) {
+        arith_uint256 refTarget = powLimit;
+        refTarget >>= v.shift;
+        const arith_uint256 result = ComputeASERTTarget(refTarget, params.nPowTargetSpacing, v.timeDiff,
+                                                          v.heightDiff, powLimit, params.BitAIASERTHalfLife);
+        const auto parsedExpected = uint256::FromHex(v.expectedTargetHex);
+        BOOST_REQUIRE(parsedExpected.has_value());
+        const arith_uint256 expected = UintToArith256(*parsedExpected);
+        BOOST_CHECK_MESSAGE(result == expected,
+                             strprintf("shift=%d heightDiff=%d timeDiff=%d -- expected %s, got %s",
+                                       v.shift, v.heightDiff, v.timeDiff, expected.ToString(), result.ToString()));
+    }
+}
+
+/* Exact branch-ordering regression (docs/AUXPOW_MILESTONE.md sec.9 item 4):
+ * 227808 is BOTH the first ASERT block AND what would otherwise have been a
+ * legacy 2016-block retarget boundary (227808 / 2016 = 113 exactly). The
+ * ASERT branch in GetNextWorkRequired() is checked FIRST and, once it
+ * matches, returns immediately -- the legacy retarget that would otherwise
+ * fire at this exact height is intentionally never reached. This is a
+ * frozen, deliberate design decision (see the real activation-boundary
+ * comparison in contrib/asert_activation_boundary_simulation.py and the
+ * write-up in docs/AUXPOW_MILESTONE.md sec.9 item 3), not an accident of
+ * code ordering -- this test exists specifically so a future refactor that
+ * silently reordered the two branches would be caught here, not discovered
+ * later as a live consensus surprise.
+ *
+ * Constructs a synthetic 225792->227807 epoch (2016 real-shaped
+ * CBlockIndex entries, mirroring GetBlockProofEquivalentTime_test's own
+ * established pattern) using BitAIcoin's REAL observed height-225792
+ * nBits/time (0x1d0fffff / 1789789080) as the epoch start, with a 10x
+ * hashrate shock for the 100 blocks before the anchor that ENDS exactly at
+ * the anchor (block 227807 itself is normal-paced) -- the exact scenario
+ * the boundary simulation identified as producing the largest legacy-vs-ASERT
+ * divergence (ASERT sees only the anchor's own normal-paced solvetime, so
+ * it stays UNCHANGED at 0x1d0fffff; the legacy 2016-block average still
+ * carries real weight from the 100-block shock and would have hardened to
+ * 0x1d0f61c6 -- a real, non-trivial, independently-confirmed-different
+ * value, not an off-by-a-rounding-error difference). */
+BOOST_AUTO_TEST_CASE(asert_branch_ordering_supersedes_legacy_retarget_at_activation)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::BITAICOIN);
+    const Consensus::Params& params = chainParams->GetConsensus();
+    BOOST_REQUIRE_EQUAL(ASERT_ACTIVATION % params.DifficultyAdjustmentInterval(), 0);
+    BOOST_REQUIRE_EQUAL(params.DifficultyAdjustmentInterval(), 2016);
+
+    constexpr int epochStartHeight = ASERT_ACTIVATION - 2016; // 225792, real height
+    constexpr int64_t epochStartTime = 1789789080;            // real observed time at that height
+    constexpr uint32_t epochStartNBits = 0x1d0fffff;           // real observed nBits at that height
+    constexpr int shockStartHeight = ASERT_ANCHOR - 100;       // shock covers the 100 blocks before the anchor
+    constexpr int shockMultiplier = 10;
+
+    std::vector<CBlockIndex> chain(2016); // heights epochStartHeight .. ASERT_ANCHOR inclusive
+    int64_t t = epochStartTime;
+    for (int i = 0; i < 2016; ++i) {
+        const int height = epochStartHeight + i;
+        chain[i].pprev = i ? &chain[i - 1] : nullptr;
+        chain[i].nHeight = height;
+        chain[i].nBits = epochStartNBits; // legacy never retargets mid-epoch -- unchanged throughout, matching real behavior
+        if (i == 0) {
+            chain[i].nTime = epochStartTime;
+            continue;
+        }
+        // Shock covers [shockStartHeight, ASERT_ANCHOR) -- ends exactly AT
+        // the anchor, so the anchor's own solvetime (the last step) is
+        // normal-paced, matching the boundary-simulation scenario exactly.
+        const bool inShock = (height >= shockStartHeight) && (height < ASERT_ANCHOR);
+        t += inShock ? (params.nPowTargetSpacing / shockMultiplier) : params.nPowTargetSpacing;
+        chain[i].nTime = t;
+    }
+    CBlockIndex& anchor = chain[2015]; // height 227807
+    BOOST_REQUIRE_EQUAL(anchor.nHeight, ASERT_ANCHOR);
+
+    // Confirm the two branches genuinely disagree for this exact scenario
+    // (independently derived, not read back from the code under test): the
+    // legacy formula computed directly here, and ASERT computed via
+    // ComputeASERTTarget() directly (bypassing GetNextWorkRequired()'s own
+    // dispatch, to get an independent reference value).
+    const int64_t actualTimespan = anchor.GetBlockTime() - epochStartTime;
+    arith_uint256 legacyTarget;
+    legacyTarget.SetCompact(epochStartNBits);
+    int64_t clampedTimespan = actualTimespan;
+    if (clampedTimespan < params.nPowTargetTimespan / 4) clampedTimespan = params.nPowTargetTimespan / 4;
+    if (clampedTimespan > params.nPowTargetTimespan * 4) clampedTimespan = params.nPowTargetTimespan * 4;
+    legacyTarget *= clampedTimespan;
+    legacyTarget /= params.nPowTargetTimespan;
+    const arith_uint256 powLimit = UintToArith256(params.powLimit);
+    if (legacyTarget > powLimit) legacyTarget = powLimit;
+    const uint32_t legacyWouldBeBits = legacyTarget.GetCompact();
+
+    arith_uint256 anchorTarget;
+    anchorTarget.SetCompact(epochStartNBits);
+    const arith_uint256 asertTarget = ComputeASERTTarget(anchorTarget, params.nPowTargetSpacing,
+                                                          anchor.GetBlockTime() - chain[2014].GetBlockTime(),
+                                                          0, powLimit, params.BitAIASERTHalfLife);
+    const uint32_t asertBits = asertTarget.GetCompact();
+
+    BOOST_REQUIRE_NE(legacyWouldBeBits, asertBits); // the scenario is only meaningful if these genuinely differ
+    BOOST_REQUIRE_EQUAL(asertBits, epochStartNBits); // matches the boundary simulation's own finding exactly (unchanged)
+
+    // THE actual regression: GetNextWorkRequired() at the real activation
+    // height must return the ASERT value, never the legacy-retarget value --
+    // proving the branch ordering (ASERT checked and returned BEFORE the
+    // legacy "every 2016 blocks" branch is ever reached), not just that the
+    // two formulas differ in isolation.
+    CBlockHeader candidate;
+    candidate.nVersion = 4;
+    const unsigned int wiredBits = GetNextWorkRequired(&anchor, &candidate, params);
+    BOOST_CHECK_EQUAL(wiredBits, asertBits);
+    BOOST_CHECK_NE(wiredBits, legacyWouldBeBits);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

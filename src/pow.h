@@ -30,11 +30,17 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
 unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nFirstBlockTime, const Consensus::Params&);
 
 /**
- * BitAIcoin ASERT (`aserti3-2d`, BCH/BCHN shape) target computation -- a
- * direct, checked C++ port of the already-validated
+ * BitAIcoin ASERT (`aserti3` arithmetic, 6-hour half-life -- NOT `aserti3-2d`;
+ * that name specifically denotes BCH's own 2-day/172800-second half-life,
+ * which BitAIcoin does not use -- see docs/AUXPOW_MILESTONE.md sec.9 for why
+ * this naming distinction matters) target computation -- a direct, checked
+ * C++ port of the already-validated arithmetic core from
  * `contrib/asert_halflife_simulation.py`/`contrib/asert_reference.py`
- * `calculate_asert()` (docs/AUXPOW_MILESTONE.md sec.8.2). Deliberately a
- * pure function of its arguments -- no `CBlockIndex`/`Consensus::Params`
+ * `calculate_asert()`, itself referenced against BCH/BCHN's real
+ * `aserti3-2d` (docs/AUXPOW_MILESTONE.md sec.8.2/sec.9 -- the arithmetic is
+ * derived from/validated against BCH's implementation; the frozen
+ * production half-life is BitAIcoin's own, unrelated 21600-second choice).
+ * Deliberately a pure function of its arguments -- no `CBlockIndex`/`Consensus::Params`
  * lookups here, so it is directly unit-testable with synthetic/extreme
  * inputs (clamp, overflow, extreme-schedule tests) without needing a real
  * chain. `GetNextWorkRequired()` resolves the real anchor/height/time

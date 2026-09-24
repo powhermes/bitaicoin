@@ -208,8 +208,13 @@ struct Params {
     int BitAIAuxpowActivationHeight{std::numeric_limits<int>::max()};
 
     /**
-     * BitAIASERTActivationHeight / BitAIASERTHalfLife: the ASERT (`aserti3-2d`,
-     * BCH/BCHN-shape) difficulty-adjustment activation -- a SEPARATE, later
+     * BitAIASERTActivationHeight / BitAIASERTHalfLife: the ASERT (`aserti3`
+     * arithmetic, 6-hour half-life -- NOT `aserti3-2d`, which specifically
+     * denotes BCH's own 2-day/172800-second half-life; the arithmetic core
+     * is derived from/validated against BCH/BCHN's real `aserti3-2d`, but
+     * the frozen production half-life below is BitAIcoin's own, unrelated
+     * 21600 seconds -- see docs/AUXPOW_MILESTONE.md sec.9)
+     * difficulty-adjustment activation -- a SEPARATE, later
      * milestone from BOTH BitAIActivationHeight (the original fork
      * transition) AND BitAIAuxpowActivationHeight/fBitAIAuxpowEnabled above,
      * even though both this and AuxPoW are intended to activate at the same

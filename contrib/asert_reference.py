@@ -1,9 +1,24 @@
 #!/usr/bin/env python3
 """
-Bit-exact port of BCHN's CalculateASERT (aserti3-2d), transcribed line-for-line
-from src/pow.cpp in bitcoin-cash-node/bitcoin-cash-node (GitHub mirror of the
-GitLab canonical repo), retrieved 2026-09-23. Source function reproduced below
-this docstring for side-by-side comparison with this port.
+Bit-exact port of BCHN's CalculateASERT arithmetic (the function BCH itself
+calls "aserti3-2d", after its own frozen 2-day/172800-second half-life),
+transcribed line-for-line from src/pow.cpp in bitcoin-cash-node/bitcoin-cash-node
+(GitHub mirror of the GitLab canonical repo), retrieved 2026-09-23. Source
+function reproduced below this docstring for side-by-side comparison with
+this port.
+
+NAMING, stated explicitly (docs/AUXPOW_MILESTONE.md sec.9): this script's
+`calculate_asert()` takes `half_life` as a plain parameter -- it is the
+ARITHMETIC CORE only, not tied to any specific half-life value. BitAIcoin's
+own frozen PRODUCTION half-life is 21600 seconds (6 hours), NOT BCH's 2 days
+-- BitAIcoin's algorithm is therefore correctly called "aserti3, 6-hour
+half-life" (or "aserti3-6h" where a compact name is useful), never
+"aserti3-2d". The C++ port of this arithmetic (src/pow.cpp's
+ComputeASERTTarget()) is differentially tested against BOTH: BCH's own real
+"aserti3-2d" (172800s) official vectors, to prove the ARITHMETIC is correct
+independent of this Python reference; and a separate BitAIcoin-halflife
+(21600s) vector set differentially tested against this script, to prove the
+CHANGED half-life parameterization. See src/test/pow_tests.cpp.
 
     arith_uint256 CalculateASERT(const arith_uint256 &refTarget,
                                  const int64_t nPowTargetSpacing,
