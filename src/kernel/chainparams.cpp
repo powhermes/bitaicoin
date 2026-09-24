@@ -393,6 +393,19 @@ public:
         consensus.fBitAIAuxpowEnabled = true;
         consensus.BitAIAuxpowActivationHeight = 227808;
 
+        // ASERT DAA activation -- a SEPARATE, later milestone from
+        // BitAIAuxpowActivationHeight above, even though both are intended for the
+        // same real production height. Deliberately NOT derived from
+        // fBitAIAuxpowEnabled -- see the field's own doc comment in
+        // consensus/params.h. Anchor = block 227807 (the last legacy-DAA block),
+        // resolved by height at runtime in GetNextWorkRequired(), never
+        // hardcoded here (block 227807 does not exist yet). Half-life frozen at
+        // 6 hours after a final rerun of contrib/asert_halflife_simulation.py
+        // showed no material reason to deviate from it -- see
+        // docs/AUXPOW_MILESTONE.md sec.8.1 for the full comparison.
+        consensus.BitAIASERTActivationHeight = 227808;
+        consensus.BitAIASERTHalfLife = 21600; // 6 hours, frozen production consensus value
+
         // Collision-free, generated-once network identity (see docs/CHAIN_IDENTITY.md).
         // Deliberately not Bitcoin's f9beb4d9/8333, and not shared with any other chain
         // defined in this file.

@@ -29,6 +29,39 @@ std::optional<arith_uint256> DeriveTarget(unsigned int nBits, uint256 pow_limit)
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params&);
 unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nFirstBlockTime, const Consensus::Params&);
 
+/**
+ * BitAIcoin ASERT (`aserti3-2d`, BCH/BCHN shape) target computation -- a
+ * direct, checked C++ port of the already-validated
+ * `contrib/asert_halflife_simulation.py`/`contrib/asert_reference.py`
+ * `calculate_asert()` (docs/AUXPOW_MILESTONE.md sec.8.2). Deliberately a
+ * pure function of its arguments -- no `CBlockIndex`/`Consensus::Params`
+ * lookups here, so it is directly unit-testable with synthetic/extreme
+ * inputs (clamp, overflow, extreme-schedule tests) without needing a real
+ * chain. `GetNextWorkRequired()` resolves the real anchor/height/time
+ * values from the active chain and calls this.
+ *
+ * `refTarget` is the ANCHOR block's own target (its `nBits`, converted).
+ * `timeDiff` is `(block whose target is being computed)'s parent's time -
+ * anchor's PARENT's time` (BCH convention: the time reference is the
+ * anchor's parent, not the anchor itself). `heightDiff` is `(that same
+ * parent)'s height - anchor's height`; the formula's own `+1` (baked into
+ * the implementation, matching real BCH source) accounts for the block
+ * actually being computed being one past that parent -- so for the first
+ * ASERT block (at the activation height), whose parent IS the anchor,
+ * `heightDiff == 0`.
+ *
+ * PRECONDITIONS (asserted, not just documented -- matching the Python
+ * reference's own rigor): `0 < refTarget <= powLimit`; `powLimit`'s bit
+ * length `<= 239` (proven exact safety bound for the `refTarget * factor`
+ * multiply -- see the .cpp for the full derivation, already established
+ * against BitAIcoin's real 228-bit powLimit); `heightDiff >= 0`.
+ *
+ * Result is always clamped to `[1, powLimit]`.
+ */
+arith_uint256 ComputeASERTTarget(const arith_uint256& refTarget, int64_t targetSpacing,
+                                  int64_t timeDiff, int64_t heightDiff,
+                                  const arith_uint256& powLimit, int64_t halfLife);
+
 /** Check whether a block hash satisfies the proof-of-work requirement specified by nBits */
 bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params&);
 bool CheckProofOfWorkImpl(uint256 hash, unsigned int nBits, const Consensus::Params&);

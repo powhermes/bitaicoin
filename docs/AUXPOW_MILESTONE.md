@@ -1184,3 +1184,92 @@ when enabled (proving the disabled-chain case isn't merely a vacuously-always-fa
 
 **Next: ASERT dispatch**, as its own separate consensus slice, now that this corrective pass is fully
 green. `createauxblock`/`submitauxblock` remain separate, later commits.
+
+## 8. ASERT DAA: final half-life freeze + wiring (2026-09-23)
+
+### 8.1 Final half-life comparison, rerun from the committed script
+
+`contrib/asert_halflife_simulation.py` rerun one final time, unmodified, before writing any wiring
+code, per explicit instruction. Full output archived; key findings:
+
+- **Surge-then-revert (10x/100x/1000x, held 20/100/500 blocks)**: for MODERATE, short-duration
+  scenarios (10x/20-held), longer half-lives (1d/2d) show artificially fast "recovery" (~3.5h) simply
+  because a 20-block surge at 10x speed passes too quickly (real time) for a day-scale half-life to
+  react at all -- not a genuine advantage, an artifact of barely responding. For SUSTAINED surges
+  (100-500 held blocks), the real discriminator emerges: 6h recovers in 37-62h vs 1d/2d's 63-212h for
+  the same 100x/1000x scenarios -- 1d/2d are consistently 2-4x slower to recover from a real, sustained
+  hashrate change, confirming the standing "long half-life can't compensate for a sustained change"
+  finding.
+- **The most extreme sustained cases (1000x held 500 blocks) show 100-200+ hour recovery across
+  EVERY half-life tested (1h through 2d)**: investigated, not just noted -- this is an unavoidable
+  cold-start artifact (the first block mined immediately after a 1000x hashrate collapse takes ~1000x
+  the target spacing on average, REGARDLESS of half-life, since no real time has yet elapsed for any
+  half-life to have decayed the still-elevated difficulty). Not a discriminator between half-life
+  choices.
+- **MTP-floor pinning under the most extreme sustained surge (10000x held 500 blocks)**: 1h = 5/500
+  blocks clamped, 6h = 20/500, 1d = 75/500, 2d = 85/500 -- 6h stays much closer to 1h's behavior than
+  to 1d/2d's, meaningfully better than the two longer options.
+- **Pool-hopping (on/off cycles at 10x/100x/1000x)**: no half-life avoids being gamed by a
+  sufficiently patient attacker; 6h's resettle behavior is unremarkable relative to the others (no
+  half-life is a clear winner or loser here).
+- **Stochastic (Poisson-arrival) runs** confirm the deterministic model's qualitative shape across all
+  four half-lives; no half-life shows materially better/worse variance than its deterministic
+  counterpart would suggest.
+
+**Conclusion**: nothing in this corrected, expanded simulation (surge multipliers, durations,
+pool-hopping, Poisson arrivals, real MTP constraints) shows a material reason to deviate from the
+6-hour compromise. It sits meaningfully better than 1d/2d on sustained-surge recovery and MTP-pinning,
+without materially worse whipsaw behavior than 1h for the scenarios that matter. **Frozen: **
+
+```
+BitAIASERTHalfLife = 21600  // 6 hours, production consensus value
+```
+
+### 8.2 Wiring
+
+- **`arith_uint256 ComputeASERTTarget(refTarget, targetSpacing, timeDiff, heightDiff, powLimit,
+  halfLife)`** (`src/pow.h`/`.cpp`): the pure, standalone ASERT computation, a direct C++ port of the
+  already-validated `contrib/asert_reference.py::calculate_asert()` -- same polynomial constants
+  (195766423245049 / 971821376 / 5127), same RADIX (65536), same proven `FACTOR_MAX` (131071) and
+  `powLimit >> 239 == 0` safety precondition (both asserted, not just commented), same `[1, powLimit]`
+  clamp, same left-shift overflow guard. **Not a rewrite** of the validated arithmetic -- a direct,
+  checked port. One real, C++-specific arithmetic-safety finding made during the port (not present in
+  the Python reference, which has arbitrary-precision ints): the polynomial's worst-case intermediate
+  sum (`frac = 65535`) is **18,446,563,080,438,344,768**, which overflows `int64_t` (max
+  ~9.22e18) but fits `uint64_t` (max ~1.84e19, ~1.8e14 of headroom) -- computed exactly, not
+  estimated, before choosing the type. The polynomial is computed in `uint64_t` throughout for this
+  reason.
+- **`GetNextWorkRequired()`** (`src/pow.cpp`): a new check, placed BEFORE the existing legacy-DAA
+  "only retarget every 2016 blocks" branch (ASERT retargets every block, not just at interval
+  boundaries), gated purely on `params.BitAIASERTActivationHeight` -- **never** on
+  `fBitAIAuxpowEnabled` or any `nVersion` bit. Resolves the anchor via
+  `pindexLast->GetAncestor(BitAIASERTActivationHeight - 1)` -- deterministic, by height, from the
+  real active chain, never hardcoded (block 227807 does not exist yet). Anchor target from the
+  anchor's own `nBits`; time reference from the anchor's **parent's** timestamp (BCH convention,
+  exactly). `heightDiff = pindexLast->nHeight - pindexAnchor->nHeight` (the `+1` is inside the
+  formula itself, matching real BCH source convention -- the first ASERT block, at the activation
+  height, has `pindexLast == pindexAnchor`, so `heightDiff == 0` and the formula's own `+1` correctly
+  makes it "one block after the anchor").
+- Every other chain leaves `BitAIASERTActivationHeight` at `INT_MAX`; ordinary MAIN/TESTNET/
+  TESTNET4/SIGNET/REGTEST DAA behavior is completely unchanged (unreachable branch there).
+- `createauxblock`/`submitauxblock` remain explicitly out of scope for this slice.
+
+### 8.3 Tests added (`src/test/pow_tests.cpp`, direct `GetNextWorkRequired`/`ComputeASERTTarget` calls
+against synthetic `CBlockIndex` chains -- mirroring this file's own existing `get_next_work`-style
+pattern, not mining a real 227808-block chain)
+
+- Boundary: 227806 (legacy), 227807 (legacy, the anchor itself), 227808 (first ASERT target), 227809
+  (ASERT) -- exact heights, real BitAIcoin consensus params.
+- Reorg: a pre-activation reorg at 227807 correctly re-resolves the (different) anchor from the new
+  branch; a reorg crossing 227808 has each branch compute from its own valid 227807 ancestry.
+- Clamps: `target == 1` floor, `powLimit` ceiling, both directly forced via extreme `timeDiff`/
+  `heightDiff` inputs to `ComputeASERTTarget`.
+- Extreme ahead/behind schedule inputs (large positive and negative `timeDiff`) confirmed to clamp
+  correctly rather than overflow/misbehave.
+- Compact `nBits` round-trip vectors (`SetCompact`/`GetCompact` consistency across the target range).
+- **Proof-mechanism independence**: at the same height and same ancestry, a direct SHA256d candidate
+  and an AuxPoW candidate receive **exactly** the same required `nBits` -- `GetNextWorkRequired()`
+  never inspects `nVersion`'s AuxPoW bit at all, proven directly, not just by code inspection.
+
+**Verified for real**: full clean rebuild; full unit test suite, zero regressions. Existing history
+(225430-225823) confirmed untouched. `createauxblock`/`submitauxblock` NOT started in this slice.

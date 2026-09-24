@@ -208,6 +208,41 @@ struct Params {
     int BitAIAuxpowActivationHeight{std::numeric_limits<int>::max()};
 
     /**
+     * BitAIASERTActivationHeight / BitAIASERTHalfLife: the ASERT (`aserti3-2d`,
+     * BCH/BCHN-shape) difficulty-adjustment activation -- a SEPARATE, later
+     * milestone from BOTH BitAIActivationHeight (the original fork
+     * transition) AND BitAIAuxpowActivationHeight/fBitAIAuxpowEnabled above,
+     * even though both this and AuxPoW are intended to activate at the same
+     * real production height (227808). Deliberately NOT inferred from
+     * fBitAIAuxpowEnabled or from nVersion's AuxPoW bit: direct-mined and
+     * AuxPoW-mined BitAIcoin blocks must receive EXACTLY the same required
+     * nBits after activation -- the proof mechanism must never affect
+     * difficulty, so this must be its own independent gate, checked in
+     * GetNextWorkRequired() (src/pow.cpp) purely by height, with no
+     * reference to nVersion at all.
+     *
+     * Defaults (INT_MAX / 0) so every other chain, and BitAIcoin below this
+     * height, is provably unaffected -- ordinary legacy-DAA behavior is
+     * completely unchanged there. `BitAIASERTHalfLife` is 0 (meaningless)
+     * whenever `BitAIASERTActivationHeight == INT_MAX`; a real chain that
+     * sets one MUST set the other, non-zero.
+     *
+     * ANCHOR CONVENTION (BCH ASERT, followed exactly -- see
+     * docs/AUXPOW_MILESTONE.md's ASERT spec section): the anchor is the
+     * block immediately BEFORE `BitAIASERTActivationHeight` (i.e. the last
+     * block validated under the legacy DAA); its own nBits is the anchor
+     * target; the time reference is the anchor's PARENT's timestamp, not
+     * the anchor's own. Resolved deterministically FROM THE ACTIVE CHAIN,
+     * BY HEIGHT (`pindexLast->GetAncestor(BitAIASERTActivationHeight - 1)`)
+     * every time -- never a hardcoded hash/time, since for the real
+     * production activation (227808) that block does not exist yet at the
+     * time this code is written; it can only be hardcoded later, once the
+     * activation chain is actually mined and frozen.
+     */
+    int BitAIASERTActivationHeight{std::numeric_limits<int>::max()};
+    int64_t BitAIASERTHalfLife{0};
+
+    /**
      * If true, witness commitments contain a payload equal to a Bitcoin Script solution
      * to the signet challenge. See BIP325.
      */
