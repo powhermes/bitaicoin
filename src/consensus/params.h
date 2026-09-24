@@ -173,17 +173,38 @@ struct Params {
     uint256 BitAIHistoricalPowLimit{};
 
     /**
+     * fBitAIAuxpowEnabled: whether THIS CHAIN TYPE has AuxPoW semantics
+     * defined AT ALL. Deliberately a separate, explicit flag from
+     * BitAIAuxpowActivationHeight below -- an activation height of INT_MAX
+     * means "permanently pre-activation" (nVersion bit 8 IS meaningful on
+     * this chain, but AuxPoW is not yet allowed at any reachable height), NOT
+     * "AuxPoW does not exist here." Real, found-in-review bug this flag
+     * fixes (2026-09-23, docs/AUXPOW_MILESTONE.md sec.6): every AuxPoW-aware
+     * code path (CheckBitAIProofOfWork's dispatch, the auxpow-aware
+     * (de)serialization functions in auxpow.h, net_processing's relay,
+     * node/blockstorage's disk I/O) inferred "this header carries a CAuxPow
+     * payload" directly from nVersion bit 8 (IsAuxpowVersion()) with NO
+     * chain-type check at all -- correct on the real BitAIcoin chain (and
+     * REGTEST, used deliberately to test it), but WRONG on ordinary
+     * MAIN/TESTNET/TESTNET4/SIGNET-style chains, where bit 8 is just an
+     * ordinary version bit with its own historical meaning and must never be
+     * interpreted as "an AuxPoW proof follows." Every AuxPoW-aware code path
+     * must check this flag FIRST, before ever calling IsAuxpowVersion() to
+     * mean anything; see the flag's own real enforcement points listed at
+     * each call site.
+     *
      * BitAIAuxpowActivationHeight: a SEPARATE, later milestone from
      * BitAIActivationHeight above -- not to be confused with it. That field
      * gates the one-time Bitcoin-to-BitAIcoin fork transition (225430, long
      * since passed); this one gates AuxPoW (merge-mining) support, height
      * 227808 on the real BitAIcoin chain, enforced via CheckAuxPowRules()
-     * (src/auxpow.h) from ContextualCheckBlockHeader. Defaults to INT_MAX so
-     * every other chain (and BitAIcoin below this height) is provably
-     * unaffected -- see docs/AUXPOW_MILESTONE.md sec.0 for the permanent
-     * policy this height activates (both direct SHA256d mining AND AuxPoW
-     * valid forever, never AuxPoW-only).
+     * (src/auxpow.h) from ContextualCheckBlockHeader -- but ONLY when
+     * fBitAIAuxpowEnabled is also true; see that function's own call site.
+     * See docs/AUXPOW_MILESTONE.md sec.0 for the permanent policy this
+     * height activates (both direct SHA256d mining AND AuxPoW valid forever,
+     * never AuxPoW-only).
      */
+    bool fBitAIAuxpowEnabled{false};
     int BitAIAuxpowActivationHeight{std::numeric_limits<int>::max()};
 
     /**

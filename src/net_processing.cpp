@@ -218,9 +218,18 @@ namespace {
  * that entry rather than announce a header claiming a proof they can't
  * actually supply if asked for the full block.
  */
-std::optional<CBlockHeader> GetHeaderForAnnounce(const CBlockIndex& index, node::BlockManager& blockman)
+std::optional<CBlockHeader> GetHeaderForAnnounce(const CBlockIndex& index, node::BlockManager& blockman, bool auxpowEnabled)
 {
-    if (!IsAuxpowVersion(index.nVersion)) {
+    // `auxpowEnabled` is taken as an explicit parameter from the caller
+    // (which has it via m_chainman.GetConsensus()) rather than reached for
+    // via `blockman` here -- BlockManager::GetConsensus() is private, and
+    // more importantly, being explicit at the call site is exactly the
+    // point of this whole chain-awareness pass (docs/AUXPOW_MILESTONE.md
+    // sec.6): on a chain with no AuxPoW concept, a stray bit-8-flagged entry
+    // must be announced via the ordinary, cheap, no-I/O GetBlockHeader()
+    // path -- never routed into the on-demand proof-read path, which exists
+    // only for chains where that bit actually means something.
+    if (!auxpowEnabled || !IsAuxpowVersion(index.nVersion)) {
         return index.GetBlockHeader();
     }
     return blockman.ReadBlockHeaderWithAuxPow(index);
@@ -2457,14 +2466,20 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         pblock = pblockRead;
     }
     if (pblock) {
+        // Chain-aware, explicit (docs/AUXPOW_MILESTONE.md sec.6): passed
+        // into AuxPowBlockForSend below so a bit-8-flagged block on a chain
+        // with no AuxPoW concept serializes with plain, historical,
+        // byte-for-byte-stock encoding, never an auxpow payload.
+        const bool auxpowEnabled{m_chainman.GetConsensus().fBitAIAuxpowEnabled};
         if (inv.IsMsgBlk()) {
-            // AuxPoW addition: AuxPowBlockNoWitness carries any attached auxpow
-            // proof through exactly like TX_NO_WITNESS did for witness data --
-            // see src/auxpow.h. Byte-for-byte identical to the old
-            // TX_NO_WITNESS(*pblock) for any block with no auxpow attached.
-            MakeAndPushMessage(pfrom, NetMsgType::BLOCK, AuxPowBlockNoWitness(*pblock));
+            // AuxPoW addition: AuxPowBlockForSend(..., with_witness=false)
+            // carries any attached auxpow proof through exactly like
+            // TX_NO_WITNESS did for witness data -- see src/auxpow.h.
+            // Byte-for-byte identical to the old TX_NO_WITNESS(*pblock) for
+            // any block with no auxpow attached.
+            MakeAndPushMessage(pfrom, NetMsgType::BLOCK, AuxPowBlockForSend(*pblock, auxpowEnabled, /*with_witness=*/false));
         } else if (inv.IsMsgWitnessBlk()) {
-            MakeAndPushMessage(pfrom, NetMsgType::BLOCK, AuxPowBlockWithWitness(*pblock));
+            MakeAndPushMessage(pfrom, NetMsgType::BLOCK, AuxPowBlockForSend(*pblock, auxpowEnabled));
         } else if (inv.IsMsgFilteredBlk()) {
             bool sendMerkleBlock = false;
             CMerkleBlock merkleBlock;
@@ -2493,7 +2508,22 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             // they won't have a useful mempool to match against a compact block,
             // and we don't feel like constructing the object for them, so
             // instead we respond with the full, non-compact block.
-            if (can_direct_fetch && pindex->nHeight >= tip->nHeight - MAX_CMPCTBLOCK_DEPTH) {
+            //
+            // AuxPoW addition: compact blocks (BIP152) never carry the
+            // AuxPoW proof -- CBlockHeaderAndShortTxIDs::SERIALIZE_METHODS
+            // uses plain, always-stock CBlockHeader serialization
+            // (src/blockencodings.h), unconditionally, for every chain type
+            // (see the removed AuxPowHeaderFormatter's replacement comment
+            // in src/auxpow.h for why: Using<>()'s static dispatch cannot
+            // carry a runtime chain-awareness flag, and this generic type's
+            // SERIALIZE_METHODS has no chain context to check one against).
+            // So an AuxPoW-flagged block is deliberately never sent via
+            // compact block on an AuxPoW-enabled chain -- it would announce
+            // a proof-less header that full validation could only reject as
+            // "auxpow-missing" once reconstructed. Falls back to the full,
+            // chain-aware BLOCK path instead, exactly like the existing
+            // "peer asking for old blocks" fallback just above.
+            if (can_direct_fetch && pindex->nHeight >= tip->nHeight - MAX_CMPCTBLOCK_DEPTH && !pblock->IsAuxpow()) {
                 if (a_recent_compact_block && a_recent_compact_block->header.GetHash() == inv.hash) {
                     MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, *a_recent_compact_block);
                 } else {
@@ -2501,7 +2531,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
                     MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, cmpctblock);
                 }
             } else {
-                MakeAndPushMessage(pfrom, NetMsgType::BLOCK, AuxPowBlockWithWitness(*pblock));
+                MakeAndPushMessage(pfrom, NetMsgType::BLOCK, AuxPowBlockForSend(*pblock, m_chainman.GetConsensus().fBitAIAuxpowEnabled));
             }
         }
     }
@@ -4490,7 +4520,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             // silently sending a proof-less (and therefore unvalidatable)
             // AuxPoW-flagged header -- the peer will simply see a shorter
             // HEADERS response and can request further via a later getheaders.
-            auto header = GetHeaderForAnnounce(*pindex, m_chainman.m_blockman);
+            auto header = GetHeaderForAnnounce(*pindex, m_chainman.m_blockman, m_chainman.GetConsensus().fBitAIAuxpowEnabled);
             if (!header) break;
             vHeaders.emplace_back(*header);
             if (--nLimit <= 0 || pindex->GetBlockHash() == hashStop)
@@ -4509,7 +4539,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         // will re-announce the new block via headers (or compact blocks again)
         // in the SendMessages logic.
         nodestate->pindexBestHeaderSent = pindex ? pindex : m_chainman.ActiveChain().Tip();
-        MakeAndPushMessage(pfrom, NetMsgType::HEADERS, AuxPowHeadersForAnnounce(vHeaders));
+        MakeAndPushMessage(pfrom, NetMsgType::HEADERS, AuxPowHeadersForAnnounce(vHeaders, m_chainman.GetConsensus().fBitAIAuxpowEnabled));
         return;
     }
 
@@ -4883,7 +4913,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             // attached proof) throw std::ios_base::failure here, exactly like
             // any other deserialize error already handled by this message's
             // caller.
-            UnserializeBlockHeaderWithAuxPow(headers[n], vRecv);
+            UnserializeBlockHeaderWithAuxPow(headers[n], vRecv, m_chainman.GetConsensus().fBitAIAuxpowEnabled);
             ReadCompactSize(vRecv); // ignore tx count; assume it is 0. Historical semantics, preserved exactly.
         }
 
@@ -4915,10 +4945,11 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
 
         std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
-        // AuxPoW addition: AuxPowBlockWithWitness parses any attached auxpow
-        // proof (based on the header's own version bit) in addition to
+        // AuxPoW addition: AuxPowBlockForRecv parses any attached auxpow
+        // proof (based on the header's own version bit, but ONLY when this
+        // chain actually has AuxPoW semantics defined) in addition to
         // everything TX_WITH_WITNESS already handled -- see src/auxpow.h.
-        vRecv >> AuxPowBlockWithWitness(*pblock);
+        vRecv >> AuxPowBlockForRecv(*pblock, m_chainman.GetConsensus().fBitAIAuxpowEnabled);
 
         LogDebug(BCLog::NET, "received block %s peer=%d\n", pblock->GetHash().ToString(), pfrom.GetId());
 
@@ -5933,7 +5964,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                         // it can't be read (pruned), fall back to the
                         // existing inv-relay path rather than announce a
                         // proof-less AuxPoW header.
-                        auto header = GetHeaderForAnnounce(*pindex, m_chainman.m_blockman);
+                        auto header = GetHeaderForAnnounce(*pindex, m_chainman.m_blockman, m_chainman.GetConsensus().fBitAIAuxpowEnabled);
                         if (!header) { fRevertToInv = true; break; }
                         vHeaders.emplace_back(*header);
                     } else if (PeerHasHeader(&state, pindex)) {
@@ -5942,7 +5973,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                         // Peer doesn't have this header but they do have the prior one.
                         // Start sending headers.
                         fFoundStartingHeader = true;
-                        auto header = GetHeaderForAnnounce(*pindex, m_chainman.m_blockman);
+                        auto header = GetHeaderForAnnounce(*pindex, m_chainman.m_blockman, m_chainman.GetConsensus().fBitAIAuxpowEnabled);
                         if (!header) { fRevertToInv = true; break; }
                         vHeaders.emplace_back(*header);
                     } else {
@@ -5954,7 +5985,13 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                 }
             }
             if (!fRevertToInv && !vHeaders.empty()) {
-                if (vHeaders.size() == 1 && state.m_requested_hb_cmpctblocks) {
+                // AuxPoW addition: never announce via compact block
+                // (BIP152) when the tip is AuxPoW-flagged -- see the
+                // matching gate/comment at the other real CMPCTBLOCK send
+                // site above (ProcessGetData) for the full rationale.
+                // Falls through to the `peer.m_prefers_headers` branch
+                // below, which uses the chain-aware AuxPowHeadersForAnnounce.
+                if (vHeaders.size() == 1 && state.m_requested_hb_cmpctblocks && !IsAuxpowVersion(pBestIndex->nVersion)) {
                     // We only send up to 1 block as header-and-ids, as otherwise
                     // probably means we're doing an initial-ish-sync or they're slow
                     LogDebug(BCLog::NET, "%s sending header-and-ids %s to peer=%d\n", __func__,
@@ -5987,7 +6024,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                         LogDebug(BCLog::NET, "%s: sending header %s to peer=%d\n", __func__,
                                 vHeaders.front().GetHash().ToString(), node.GetId());
                     }
-                    MakeAndPushMessage(node, NetMsgType::HEADERS, AuxPowHeadersForAnnounce(vHeaders));
+                    MakeAndPushMessage(node, NetMsgType::HEADERS, AuxPowHeadersForAnnounce(vHeaders, m_chainman.GetConsensus().fBitAIAuxpowEnabled));
                     state.pindexBestHeaderSent = pBestIndex;
                 } else
                     fRevertToInv = true;

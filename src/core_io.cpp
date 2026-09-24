@@ -248,7 +248,7 @@ bool DecodeHexBlockHeader(CBlockHeader& header, const std::string& hex_header)
     return true;
 }
 
-bool DecodeHexBlk(CBlock& block, const std::string& strHexBlk)
+bool DecodeHexBlk(CBlock& block, const std::string& strHexBlk, bool auxpowEnabled)
 {
     if (!IsHex(strHexBlk))
         return false;
@@ -264,11 +264,14 @@ bool DecodeHexBlk(CBlock& block, const std::string& strHexBlk)
         // corrupted (but not always exception-throwing) block rather than
         // failing cleanly. Fixed to the same auxpow-aware formatter every
         // other real block-deserialization call site already uses (see
-        // src/auxpow.h). This is also what makes submitblock/RPC-submitted
-        // AuxPoW blocks decode correctly for the first time -- a real,
-        // positive side effect of fixing the RPC-layer gap this bug was
-        // found in, not a scope expansion in itself.
-        SpanReader{blockData} >> AuxPowBlockWithWitness(block);
+        // src/auxpow.h), now taking `auxpowEnabled` explicitly from the
+        // caller's real chain params (sec.6) -- this function itself has no
+        // chain context of its own to check. This is also what makes
+        // submitblock/RPC-submitted AuxPoW blocks decode correctly for the
+        // first time on an AuxPoW-enabled chain -- a real, positive side
+        // effect of fixing the RPC-layer gap this bug was found in, not a
+        // scope expansion in itself.
+        SpanReader{blockData} >> AuxPowBlockForRecv(block, auxpowEnabled);
     }
     catch (const std::exception&) {
         return false;

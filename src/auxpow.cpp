@@ -283,6 +283,20 @@ bool CheckAuxPowRules(int32_t nVersion, int nHeight, const uint256& hashHeader, 
 
 bool CheckBitAIProofOfWork(const CBlockHeader& header, const Consensus::Params& params, BlockValidationState& state)
 {
+    // Chain-aware, first, before ANYTHING else looks at nVersion's bit 8
+    // (real bug found in review, 2026-09-23, docs/AUXPOW_MILESTONE.md
+    // sec.6): on a chain with no AuxPoW concept at all, bit 8 is just an
+    // ordinary version bit with its own historical meaning -- it must never
+    // be interpreted as "an AuxPoW proof follows," no matter what value it
+    // holds or whether a proof happens to be attached.
+    if (!params.fBitAIAuxpowEnabled) {
+        if (!CheckProofOfWork(header.GetHash(), header.nBits, params)) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                  "high-hash", "proof of work failed");
+        }
+        return true;
+    }
+
     if (!header.IsAuxpow()) {
         // DIRECT block: unchanged, ordinary check on the header's own hash.
         if (!CheckProofOfWork(header.GetHash(), header.nBits, params)) {

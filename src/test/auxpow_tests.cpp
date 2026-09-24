@@ -624,18 +624,18 @@ BOOST_AUTO_TEST_CASE(serialize_roundtrip_no_auxpow_matches_plain_header_serializ
     plainStream << h; // plain CBlockHeader::SERIALIZE_METHODS, unchanged
 
     DataStream auxpowAwareStream;
-    SerializeBlockHeaderWithAuxPow(h, auxpowAwareStream);
+    SerializeBlockHeaderWithAuxPow(h, auxpowAwareStream, true);
 
     BOOST_CHECK_EQUAL(HexStr(plainStream), HexStr(auxpowAwareStream));
 
     // Round trip through the new deserializer and back.
     CBlockHeader h2;
-    UnserializeBlockHeaderWithAuxPow(h2, auxpowAwareStream);
+    UnserializeBlockHeaderWithAuxPow(h2, auxpowAwareStream, true);
     BOOST_CHECK(h2.auxpow == nullptr);
     BOOST_CHECK_EQUAL(h2.GetHash().GetHex(), h.GetHash().GetHex());
 
     DataStream reserialized;
-    SerializeBlockHeaderWithAuxPow(h2, reserialized);
+    SerializeBlockHeaderWithAuxPow(h2, reserialized, true);
     BOOST_CHECK_EQUAL(HexStr(reserialized), HexStr(plainStream));
 }
 
@@ -651,11 +651,11 @@ BOOST_AUTO_TEST_CASE(serialize_roundtrip_with_auxpow_network_style)
     BOOST_REQUIRE(h.auxpow != nullptr);
 
     DataStream ss;
-    SerializeBlockHeaderWithAuxPow(h, ss);
+    SerializeBlockHeaderWithAuxPow(h, ss, true);
     const std::string originalHex = HexStr(ss); // captured before Unserialize consumes the read position
 
     CBlockHeader h2;
-    UnserializeBlockHeaderWithAuxPow(h2, ss);
+    UnserializeBlockHeaderWithAuxPow(h2, ss, true);
     BOOST_CHECK(h2.IsAuxpow());
     BOOST_REQUIRE(h2.auxpow != nullptr);
     BOOST_CHECK_EQUAL(h2.GetHash().GetHex(), h.GetHash().GetHex());
@@ -666,7 +666,7 @@ BOOST_AUTO_TEST_CASE(serialize_roundtrip_with_auxpow_network_style)
 
     // Serialize->deserialize->serialize: byte-identical the second time.
     DataStream ss2;
-    SerializeBlockHeaderWithAuxPow(h2, ss2);
+    SerializeBlockHeaderWithAuxPow(h2, ss2, true);
     BOOST_CHECK_EQUAL(HexStr(ss2), originalHex);
 }
 
@@ -682,14 +682,14 @@ BOOST_AUTO_TEST_CASE(serialize_roundtrip_with_auxpow_disk_style)
     const fs::path path{m_args.GetDataDirBase() / "test_auxpow_header.bin"};
     {
         AutoFile fileOut{fsbridge::fopen(path, "wb")};
-        SerializeBlockHeaderWithAuxPow(h, fileOut);
+        SerializeBlockHeaderWithAuxPow(h, fileOut, true);
         BOOST_CHECK_EQUAL(fileOut.fclose(), 0);
     }
 
     CBlockHeader h2;
     {
         AutoFile fileIn{fsbridge::fopen(path, "rb")};
-        UnserializeBlockHeaderWithAuxPow(h2, fileIn);
+        UnserializeBlockHeaderWithAuxPow(h2, fileIn, true);
         BOOST_CHECK_EQUAL(fileIn.fclose(), 0);
     }
 
@@ -715,7 +715,7 @@ BOOST_AUTO_TEST_CASE(auxpow_bit_set_but_proof_missing_fails_to_serialize)
     BOOST_CHECK(h.auxpow == nullptr);
 
     DataStream ss;
-    BOOST_CHECK_EXCEPTION(SerializeBlockHeaderWithAuxPow(h, ss), std::ios_base::failure,
+    BOOST_CHECK_EXCEPTION(SerializeBlockHeaderWithAuxPow(h, ss, true), std::ios_base::failure,
                            [](const std::ios_base::failure& e) { return std::string(e.what()).find("no auxpow proof attached") != std::string::npos; });
 }
 
@@ -732,7 +732,7 @@ BOOST_AUTO_TEST_CASE(deserialize_rejects_truncated_auxpow_stream)
     ss << version << prev << merkle << time << bits << nonce; // no auxpow payload follows
 
     CBlockHeader h2;
-    BOOST_CHECK_THROW(UnserializeBlockHeaderWithAuxPow(h2, ss), std::ios_base::failure);
+    BOOST_CHECK_THROW(UnserializeBlockHeaderWithAuxPow(h2, ss, true), std::ios_base::failure);
 }
 
 BOOST_AUTO_TEST_CASE(deserialize_rejects_oversized_merkle_branch_claim)
@@ -765,7 +765,7 @@ BOOST_AUTO_TEST_CASE(deserialize_rejects_oversized_merkle_branch_claim)
     ss << *h.auxpow;
 
     CBlockHeader h2;
-    BOOST_CHECK_EXCEPTION(UnserializeBlockHeaderWithAuxPow(h2, ss), std::ios_base::failure,
+    BOOST_CHECK_EXCEPTION(UnserializeBlockHeaderWithAuxPow(h2, ss, true), std::ios_base::failure,
                            [](const std::ios_base::failure& e) { return std::string(e.what()).find("implausibly long") != std::string::npos; });
 }
 
@@ -787,9 +787,9 @@ BOOST_AUTO_TEST_CASE(direct_mining_header_serializes_without_auxpow_both_sides_o
     BOOST_CHECK(!h.IsAuxpow());
 
     DataStream ss;
-    SerializeBlockHeaderWithAuxPow(h, ss);
+    SerializeBlockHeaderWithAuxPow(h, ss, true);
     CBlockHeader h2;
-    UnserializeBlockHeaderWithAuxPow(h2, ss);
+    UnserializeBlockHeaderWithAuxPow(h2, ss, true);
     BOOST_CHECK(h2.auxpow == nullptr);
     BOOST_CHECK_EQUAL(h2.GetHash().GetHex(), h.GetHash().GetHex());
 }
@@ -899,7 +899,7 @@ BOOST_AUTO_TEST_CASE(block_serialize_no_auxpow_matches_generic_serialize)
     genericStream << TX_WITH_WITNESS(block);
 
     DataStream auxpowAwareStream;
-    SerializeBlockWithAuxPow(block, auxpowAwareStream);
+    SerializeBlockWithAuxPow(block, auxpowAwareStream, true);
 
     BOOST_CHECK_EQUAL(HexStr(genericStream), HexStr(auxpowAwareStream));
 }
@@ -912,7 +912,7 @@ BOOST_AUTO_TEST_CASE(block_carries_auxpow_proof_exactly_once_and_roundtrips)
     BOOST_REQUIRE(block.auxpow != nullptr);
 
     DataStream ss;
-    SerializeBlockWithAuxPow(block, ss);
+    SerializeBlockWithAuxPow(block, ss, true);
 
     // "Exactly once": the raw merge-mining tag bytes must appear exactly
     // once in the fully serialized block, not duplicated and not appearing
@@ -929,7 +929,7 @@ BOOST_AUTO_TEST_CASE(block_carries_auxpow_proof_exactly_once_and_roundtrips)
     BOOST_CHECK(hex.find(tagHex, firstPos + tagHex.size()) == std::string::npos);
 
     CBlock block2;
-    UnserializeBlockWithAuxPow(block2, ss);
+    UnserializeBlockWithAuxPow(block2, ss, true);
     BOOST_REQUIRE(block2.auxpow != nullptr);
     BOOST_CHECK_EQUAL(block2.GetHash().GetHex(), block.GetHash().GetHex());
     BOOST_CHECK_EQUAL(block2.vtx.size(), block.vtx.size());
@@ -961,9 +961,9 @@ BOOST_AUTO_TEST_CASE(block_roundtrip_direct_mining_with_real_multi_tx_vtx)
     BOOST_CHECK_EQUAL(block.vtx.size(), 2u);
 
     DataStream ss;
-    SerializeBlockWithAuxPow(block, ss);
+    SerializeBlockWithAuxPow(block, ss, true);
     CBlock block2;
-    UnserializeBlockWithAuxPow(block2, ss);
+    UnserializeBlockWithAuxPow(block2, ss, true);
 
     BOOST_CHECK(block2.auxpow == nullptr);
     BOOST_CHECK_EQUAL(block2.GetHash().GetHex(), block.GetHash().GetHex());
@@ -985,7 +985,7 @@ BOOST_AUTO_TEST_CASE(block_malformed_truncated_auxpow_rejected_cleanly)
     CBlock block = MakeRealBlock(/*withAuxpow=*/true, params);
 
     DataStream full;
-    SerializeBlockWithAuxPow(block, full);
+    SerializeBlockWithAuxPow(block, full, true);
 
     // Truncate to roughly 70% of the real length -- lands somewhere inside
     // the auxpow payload for this fixture (well past the 6 fixed-size base
@@ -999,7 +999,7 @@ BOOST_AUTO_TEST_CASE(block_malformed_truncated_auxpow_rejected_cleanly)
     DataStream truncated{std::span<const uint8_t>(bytes)};
 
     CBlock block2;
-    BOOST_CHECK_THROW(UnserializeBlockWithAuxPow(block2, truncated), std::ios_base::failure);
+    BOOST_CHECK_THROW(UnserializeBlockWithAuxPow(block2, truncated, true), std::ios_base::failure);
 }
 
 // --- Item 1: HEADERS-message AuxPoW transport ---
@@ -1016,7 +1016,7 @@ std::vector<CBlockHeader> ReceiveHeadersMessage(Stream& s)
     unsigned int nCount = ReadCompactSize(s);
     std::vector<CBlockHeader> headers(nCount);
     for (unsigned int n = 0; n < nCount; n++) {
-        UnserializeBlockHeaderWithAuxPow(headers[n], s);
+        UnserializeBlockHeaderWithAuxPow(headers[n], s, true);
         ReadCompactSize(s); // ignore tx count; assume it is 0.
     }
     return headers;
@@ -1045,7 +1045,7 @@ BOOST_AUTO_TEST_CASE(headers_message_mixed_vector_roundtrip)
     std::vector<CBlockHeader> sent = {plain1, withAuxpow, plain2};
 
     DataStream ss;
-    ss << AuxPowHeadersForAnnounce(sent);
+    ss << AuxPowHeadersForAnnounce(sent, true);
 
     std::vector<CBlockHeader> received = ReceiveHeadersMessage(ss);
 
@@ -1087,7 +1087,7 @@ BOOST_AUTO_TEST_CASE(headers_message_non_auxpow_byte_identical_to_historical_for
     legacyStream << TX_WITH_WITNESS(legacyBlocks);
 
     DataStream newStream;
-    newStream << AuxPowHeadersForAnnounce(headers);
+    newStream << AuxPowHeadersForAnnounce(headers, true);
 
     BOOST_CHECK_EQUAL(HexStr(legacyStream), HexStr(newStream));
 }
@@ -1100,7 +1100,7 @@ BOOST_AUTO_TEST_CASE(headers_message_malformed_truncated_rejected)
     std::vector<CBlockHeader> sent = {withAuxpow};
 
     DataStream full;
-    full << AuxPowHeadersForAnnounce(sent);
+    full << AuxPowHeadersForAnnounce(sent, true);
 
     const std::string fullHex = HexStr(full);
     const std::string truncatedHex = fullHex.substr(0, fullHex.size() * 6 / 10);
@@ -1390,6 +1390,165 @@ BOOST_AUTO_TEST_CASE(check_auxpow_rules_unaffected_by_nearby_bip34_boundary)
     }
 }
 
+// --- Chain-awareness isolation tests (2026-09-23 corrective pass,
+// docs/AUXPOW_MILESTONE.md sec.6) ---
+//
+// Real, found-in-review architectural gap this section proves is fixed: no
+// AuxPoW-aware code path may EVER infer "this header carries a CAuxPow
+// payload" from nVersion bit 8 alone. Every one of them must check
+// params.fBitAIAuxpowEnabled FIRST. Desired state, tested directly against
+// the real per-chain-type params (not asserted, DERIVED from the real
+// CreateChainParams() output for each):
+//   ChainType::BITAICOIN / REGTEST : fBitAIAuxpowEnabled == true
+//   ChainType::MAIN/TESTNET/TESTNET4/SIGNET : fBitAIAuxpowEnabled == false
+
+BOOST_AUTO_TEST_CASE(auxpow_enabled_flag_matches_the_desired_per_chain_state)
+{
+    for (auto chainType : {ChainType::BITAICOIN, ChainType::REGTEST}) {
+        const auto params = CreateChainParams(*m_node.args, chainType);
+        BOOST_CHECK_MESSAGE(params->GetConsensus().fBitAIAuxpowEnabled,
+                             "chain type " << static_cast<int>(chainType) << " must have AuxPoW enabled");
+    }
+    for (auto chainType : {ChainType::MAIN, ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET}) {
+        const auto params = CreateChainParams(*m_node.args, chainType);
+        BOOST_CHECK_MESSAGE(!params->GetConsensus().fBitAIAuxpowEnabled,
+                             "chain type " << static_cast<int>(chainType) << " must NOT have AuxPoW enabled -- "
+                                           "nVersion bit 8 must retain its ordinary historical meaning there");
+    }
+}
+
+// (A) AuxPoW-disabled chain: a header with bit 8 set, no auxpow pointer --
+// the ordinary PoW validation path is used regardless.
+BOOST_AUTO_TEST_CASE(disabled_chain_bit8_header_uses_ordinary_pow_check_not_auxpow_dispatch)
+{
+    const auto mainParams = CreateChainParams(*m_node.args, ChainType::MAIN);
+    const Consensus::Params& params = mainParams->GetConsensus();
+    BOOST_REQUIRE(!params.fBitAIAuxpowEnabled);
+
+    CBlockHeader h;
+    h.nVersion = MakeAuxpowVersion(BITAI_AUXPOW_CHAIN_ID, 4); // bit 8 set, exactly as a real AuxPoW header would be
+    BOOST_REQUIRE(IsAuxpowVersion(h.nVersion)); // the bit really is set -- this test is not vacuous
+    h.hashPrevBlock = uint256{"1111111111111111111111111111111111111111111111111111111111111111"};
+    h.hashMerkleRoot = uint256{"2222222222222222222222222222222222222222222222222222222222222222"};
+    h.nTime = 1700000000;
+    h.nBits = IMPOSSIBLE_BITS; // deliberately unsatisfiable -- see below
+    h.nNonce = 42;
+    h.auxpow = nullptr; // no proof attached -- must not matter on a disabled chain
+
+    // Proves DISPATCH EQUIVALENCE, not just "it fails": CheckBitAIProofOfWork
+    // must behave identically to a raw CheckProofOfWork call on this exact
+    // header, on a disabled chain -- same accept/reject decision. A real
+    // MAIN-difficulty accept case isn't practical in a unit test (would
+    // require real mining against MAIN's tight powLimit), but the dispatch
+    // logic itself doesn't care whether the plain check happens to pass or
+    // fail -- it must reach the SAME plain check either way, ignoring bit
+    // 8/auxpow entirely.
+    BlockValidationState dispatchState;
+    const bool dispatchResult = CheckBitAIProofOfWork(h, params, dispatchState);
+    const bool plainResult = CheckProofOfWork(h.GetHash(), h.nBits, params);
+
+    BOOST_CHECK_EQUAL(dispatchResult, plainResult);
+    BOOST_CHECK_EQUAL(dispatchResult, false); // IMPOSSIBLE_BITS guarantees this concretely, not just symmetrically
+    BOOST_CHECK_EQUAL(dispatchState.GetRejectReason(), "high-hash"); // NOT "auxpow-missing" or any other auxpow-* reason
+}
+
+// (A continued) Serialization stays historical 80-byte format; deserialize
+// does NOT attempt to consume CAuxPow bytes -- even with bit 8 set and a
+// real proof attached (the worst case: proves the disabled-chain path
+// ignores the proof entirely rather than merely "not requiring" it).
+BOOST_AUTO_TEST_CASE(disabled_chain_serialization_stays_historical_no_auxpow_bytes_ever)
+{
+    const auto regtestParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& params = regtestParams->GetConsensus();
+
+    CBlockHeader h = MakeHeaderWithAuxpow(BITAI_AUXPOW_CHAIN_ID, params); // built with a REAL, valid, attached proof
+    BOOST_REQUIRE(h.auxpow != nullptr);
+    BOOST_REQUIRE(h.IsAuxpow());
+
+    // Serialize with auxpowEnabled=false (as if this were a disabled chain's
+    // header, e.g. because it were MAIN's own real serialize call site) --
+    // must be EXACTLY 80 bytes, byte-for-byte identical to CBlockHeader's
+    // own plain, generic Serialize (which has no concept of auxpow at all).
+    DataStream disabledStream;
+    SerializeBlockHeaderWithAuxPow(h, disabledStream, /*auxpowEnabled=*/false);
+    BOOST_CHECK_EQUAL(disabledStream.size(), 80);
+
+    DataStream plainStream;
+    plainStream << h; // CBlockHeader::SERIALIZE_METHODS -- the 6 base fields only, unconditionally
+    BOOST_CHECK_EQUAL(HexStr(disabledStream), HexStr(plainStream));
+
+    // Deserialize with auxpowEnabled=false must NOT attempt to read a
+    // CAuxPow payload -- append distinguishable trailing bytes (as if this
+    // were the start of a vtx list or the next message on the wire) and
+    // confirm they are left completely UNCONSUMED, proving the parser
+    // stopped after exactly 80 bytes rather than misreading them as an
+    // auxpow payload.
+    DataStream withTrailingData{disabledStream};
+    const std::vector<unsigned char> trailer = {0xde, 0xad, 0xbe, 0xef, 0x00};
+    withTrailingData.write(std::as_bytes(std::span(trailer))); // raw append, no length-prefix framing
+    const size_t sizeBeforeParse = withTrailingData.size();
+
+    CBlockHeader h2;
+    UnserializeBlockHeaderWithAuxPow(h2, withTrailingData, /*auxpowEnabled=*/false);
+    BOOST_CHECK(h2.auxpow == nullptr); // never populated, despite bit 8 being set and a real proof existing in `h`
+    BOOST_CHECK_EQUAL(h2.nVersion, h.nVersion); // bit 8 itself is preserved (it's just data, not acted on)
+    BOOST_CHECK_EQUAL(sizeBeforeParse - withTrailingData.size(), 80); // exactly 80 bytes consumed, not one more
+    BOOST_CHECK_EQUAL(withTrailingData.size(), trailer.size()); // the trailer is still there, completely untouched
+}
+
+// (D) Existing MAIN/TESTNET/TESTNET4/SIGNET behavior remains
+// byte-for-byte/decision-compatible with upstream for representative
+// headers, including one with bit 8 set -- proves the disabled-chain path
+// isn't merely "usually right" but genuinely indistinguishable from code
+// that never knew AuxPoW existed, for every one of those chain types.
+BOOST_AUTO_TEST_CASE(ordinary_chains_are_byte_and_decision_compatible_with_upstream_including_bit8)
+{
+    for (auto chainType : {ChainType::MAIN, ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET}) {
+        const auto chainParams = CreateChainParams(*m_node.args, chainType);
+        const Consensus::Params& params = chainParams->GetConsensus();
+        BOOST_REQUIRE(!params.fBitAIAuxpowEnabled);
+
+        for (int32_t version : {int32_t{4}, MakeAuxpowVersion(BITAI_AUXPOW_CHAIN_ID, 7) /* bit 8 SET */}) {
+            CBlockHeader h;
+            h.nVersion = version;
+            h.hashPrevBlock = uint256{"3333333333333333333333333333333333333333333333333333333333333333"};
+            h.hashMerkleRoot = uint256{"4444444444444444444444444444444444444444444444444444444444444444"};
+            h.nTime = 1700000000;
+            h.nBits = IMPOSSIBLE_BITS;
+            h.nNonce = 7;
+
+            // Serialization: byte-for-byte identical, chain-aware call vs. plain.
+            DataStream chainAwareStream;
+            SerializeBlockHeaderWithAuxPow(h, chainAwareStream, params.fBitAIAuxpowEnabled);
+            DataStream plainStream;
+            plainStream << h;
+            BOOST_CHECK_EQUAL(chainAwareStream.size(), 80);
+            BOOST_CHECK_EQUAL(HexStr(chainAwareStream), HexStr(plainStream));
+
+            // Decision: byte-for-byte identical accept/reject, chain-aware
+            // dispatcher vs. plain CheckProofOfWork.
+            BlockValidationState dispatchState;
+            const bool dispatchResult = CheckBitAIProofOfWork(h, params, dispatchState);
+            const bool plainResult = CheckProofOfWork(h.GetHash(), h.nBits, params);
+            BOOST_CHECK_EQUAL(dispatchResult, plainResult);
+            BOOST_CHECK_EQUAL(dispatchResult, false); // IMPOSSIBLE_BITS guarantees this concretely
+            if (!dispatchResult) {
+                BOOST_CHECK_EQUAL(dispatchState.GetRejectReason(), "high-hash");
+            }
+        }
+    }
+}
+
+// (B)/(C) AuxPoW-enabled BitAIcoin, pre- and post-activation -- already
+// covered exhaustively elsewhere in this file (auxpow_rules_reject_auxpow_bit_before_activation,
+// auxpow_rules_accept_valid_proof_after_activation,
+// check_auxpow_rules_boundary_matches_real_activation_height_exactly, and
+// the real end-to-end acceptance test in auxpow_transport_tests below).
+// Cross-referenced here, not duplicated, per this section's own scope: this
+// section exists specifically to prove chain-type ISOLATION, not to
+// re-litigate height-gate correctness already proven directly against
+// CheckAuxPowRules() elsewhere.
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // --- Item 5: the real AuxPoW transport + acceptance test, before splicing
@@ -1411,7 +1570,7 @@ BOOST_AUTO_TEST_SUITE_END()
 // socket bytes. Per explicit instruction, "a deterministic functional-test
 // fixture ... is acceptable and preferable to waiting for the mining RPC
 // implementation" -- this is that fixture. It exercises the exact same
-// AuxPowBlockWithWitness/CheckBitAIProofOfWork/CAuxPow::Check() functions
+// AuxPowBlockForSend/Recv/CheckBitAIProofOfWork/CAuxPow::Check() functions
 // that are now genuinely wired into net_processing.cpp and blockstorage.cpp
 // (not separate copies), so a real two-OS-process raw-socket run would be
 // exercising the identical validation code path this test already proves
@@ -1523,9 +1682,9 @@ BOOST_AUTO_TEST_CASE(real_auxpow_block_transported_and_accepted_by_chainstateman
     // simulating what a receiving node would actually deserialize off the
     // wire or off disk before ever handing it to validation.
     DataStream wire;
-    SerializeBlockWithAuxPow(*auxBlock, wire);
+    SerializeBlockWithAuxPow(*auxBlock, wire, true);
     auto received = std::make_shared<CBlock>();
-    UnserializeBlockWithAuxPow(*received, wire);
+    UnserializeBlockWithAuxPow(*received, wire, true);
 
     BOOST_CHECK_EQUAL(received->GetHash().GetHex(), expectedHash.GetHex());
     BOOST_REQUIRE(received->auxpow != nullptr);

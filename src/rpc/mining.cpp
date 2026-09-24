@@ -733,7 +733,7 @@ static RPCHelpMan getblocktemplate()
                 throw JSONRPCError(RPC_TYPE_ERROR, "Missing data String key for proposal");
 
             CBlock block;
-            if (!DecodeHexBlk(block, dataval.get_str()))
+            if (!DecodeHexBlk(block, dataval.get_str(), chainman.GetConsensus().fBitAIAuxpowEnabled))
                 throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
 
             uint256 hash = block.GetHash();
@@ -1069,11 +1069,15 @@ static RPCHelpMan submitblock()
 {
     std::shared_ptr<CBlock> blockptr = std::make_shared<CBlock>();
     CBlock& block = *blockptr;
-    if (!DecodeHexBlk(block, request.params[0].get_str())) {
+    // ChainstateManager fetched before decode (moved up, 2026-09-23,
+    // docs/AUXPOW_MILESTONE.md sec.6): DecodeHexBlk() needs the real
+    // chain's fBitAIAuxpowEnabled explicitly -- there is no safe way to
+    // infer it from the hex alone.
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    if (!DecodeHexBlk(block, request.params[0].get_str(), chainman.GetConsensus().fBitAIAuxpowEnabled)) {
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
     }
 
-    ChainstateManager& chainman = EnsureAnyChainman(request.context);
     {
         LOCK(cs_main);
         const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock);

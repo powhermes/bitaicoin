@@ -4235,15 +4235,26 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     // proven true by the time execution reaches this point -- see
     // CheckAuxPowRules()'s own doc comment in src/auxpow.h and
     // docs/AUXPOW_MILESTONE.md sec.0/4 for why the two are kept separate.
-    // Every chain except the real BitAIcoin one leaves
-    // BitAIAuxpowActivationHeight at INT_MAX, so `nHeight < activationHeight`
-    // is always true there and this reduces to the existing
-    // "AUXPOW bit must not be set" pre-activation rule for every block that
-    // exists anywhere else -- unaffected, by construction.
-    if (!CheckAuxPowRules(block.nVersion, nHeight, block.GetHash(), block.nBits,
-                          block.auxpow.get(), BITAI_AUXPOW_CHAIN_ID,
-                          consensusParams.BitAIAuxpowActivationHeight, consensusParams, state)) {
-        return false;
+    //
+    // Gated on fBitAIAuxpowEnabled EXPLICITLY, not merely on
+    // BitAIAuxpowActivationHeight being reachable (real bug found in review,
+    // 2026-09-23, docs/AUXPOW_MILESTONE.md sec.6): an activation height of
+    // INT_MAX means "permanently pre-activation" for a chain that DOES have
+    // AuxPoW semantics defined, not "AuxPoW does not exist here." Without
+    // this explicit gate, a header on an ordinary MAIN/TESTNET/TESTNET4/
+    // SIGNET-style chain that happens to have nVersion bit 8 set for
+    // unrelated reasons would be WRONGLY rejected here as
+    // "auxpow-before-activation" -- CheckAuxPowRules() has no way to know,
+    // from its own parameters alone, that bit 8 means nothing on that chain.
+    // Skipping the call entirely when disabled leaves such a header
+    // completely unaffected by AuxPoW policy, exactly as if this code did
+    // not exist.
+    if (consensusParams.fBitAIAuxpowEnabled) {
+        if (!CheckAuxPowRules(block.nVersion, nHeight, block.GetHash(), block.nBits,
+                              block.auxpow.get(), BITAI_AUXPOW_CHAIN_ID,
+                              consensusParams.BitAIAuxpowActivationHeight, consensusParams, state)) {
+            return false;
+        }
     }
 
     return true;

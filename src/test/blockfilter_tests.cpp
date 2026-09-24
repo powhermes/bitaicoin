@@ -152,7 +152,10 @@ BOOST_AUTO_TEST_CASE(blockfilters_json_test)
         BOOST_CHECK(uint256::FromHex(test[pos++].get_str()));
 
         CBlock block;
-        BOOST_REQUIRE(DecodeHexBlk(block, test[pos++].get_str()));
+        // These are real, hardcoded historical Bitcoin block test vectors
+        // (BIP158), unrelated to BitAIcoin/AuxPoW entirely -- auxpowEnabled
+        // is unconditionally false here.
+        BOOST_REQUIRE(DecodeHexBlk(block, test[pos++].get_str(), /*auxpowEnabled=*/false));
 
         CBlockUndo block_undo;
         block_undo.vtxundo.emplace_back();

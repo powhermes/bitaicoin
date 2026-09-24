@@ -874,8 +874,11 @@ static RPCHelpMan getblock()
     // block silently rather than failing cleanly -- caught via
     // test/functional/feature_auxpow_prune.py, not by inspection. Fixed to
     // the same formatter every other real block-deserialization call site
-    // already uses (src/auxpow.h).
-    SpanReader{block_data} >> AuxPowBlockWithWitness(block);
+    // already uses (src/auxpow.h), passing chainman.GetConsensus()'s real
+    // fBitAIAuxpowEnabled explicitly (sec.6) -- on a chain with no AuxPoW
+    // concept this is byte-for-byte the plain, stock deserialize regardless
+    // of nVersion bit 8.
+    SpanReader{block_data} >> AuxPowBlockForRecv(block, chainman.GetConsensus().fBitAIAuxpowEnabled);
 
     TxVerbosity tx_verbosity;
     if (verbosity == 1) {

@@ -164,9 +164,19 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 // returns a proof-less header now). For every block that exists
                 // today or that predates AuxPoW activation, IsAuxpowVersion is
                 // false and this is byte-for-byte the same as before.
+                //
+                // Gated on consensusParams.fBitAIAuxpowEnabled EXPLICITLY too
+                // (real bug found in review, 2026-09-23,
+                // docs/AUXPOW_MILESTONE.md sec.6): on a chain with no AuxPoW
+                // concept, a stray bit-8-flagged entry must be treated as an
+                // ORDINARY header (CheckBitAIProofOfWork is itself
+                // chain-aware and will do exactly that below) -- not routed
+                // into the auxpow-proof-read path at all, which would
+                // otherwise misdiagnose it as pruned/corrupted data for a
+                // proof that was never expected to exist on this chain.
                 CBlockHeader headerForPowCheck = pindexNew->GetBlockHeader();
                 bool skipPowRecheck = false;
-                if (IsAuxpowVersion(pindexNew->nVersion)) {
+                if (consensusParams.fBitAIAuxpowEnabled && IsAuxpowVersion(pindexNew->nVersion)) {
                     auto fullHeader = readAuxPowHeader(*pindexNew);
                     if (!fullHeader) {
                         // Real bug found via functional testing
@@ -990,7 +1000,7 @@ void BlockManager::UpdateBlockInfo(const CBlock& block, unsigned int nHeight, co
     }
 
     // Update the file information with the current block.
-    const unsigned int added_size = ::GetSerializeSize(AuxPowBlockWithWitness(block));
+    const unsigned int added_size = ::GetSerializeSize(AuxPowBlockForSend(block, GetConsensus().fBitAIAuxpowEnabled));
     const int nFile = pos.nFile;
     if (static_cast<int>(m_blockfile_info.size()) <= nFile) {
         m_blockfile_info.resize(nFile + 1);
@@ -1103,7 +1113,7 @@ bool BlockManager::ReadBlock(CBlock& block, const FlatFilePos& pos, const std::o
 
     try {
         // Read block
-        SpanReader{*block_data} >> AuxPowBlockWithWitness(block);
+        SpanReader{*block_data} >> AuxPowBlockForRecv(block, GetConsensus().fBitAIAuxpowEnabled);
     } catch (const std::exception& e) {
         LogError("Deserialize or I/O error - %s at %s while reading block", e.what(), pos.ToString());
         return false;
@@ -1197,6 +1207,15 @@ BlockManager::ReadRawBlockResult BlockManager::ReadRawBlock(const FlatFilePos& p
 
 std::optional<CBlockHeader> BlockManager::ReadBlockHeaderWithAuxPow(const CBlockIndex& index) const
 {
+    // Defense in depth (real call sites -- LoadBlockIndexGuts,
+    // GetHeaderForAnnounce -- already gate on fBitAIAuxpowEnabled before
+    // ever calling this, per docs/AUXPOW_MILESTONE.md sec.6): this function
+    // has no reason to ever be called on a chain with no AuxPoW concept, so
+    // it refuses outright rather than silently reading/interpreting bytes
+    // that were never written with any auxpow semantics in mind.
+    if (!GetConsensus().fBitAIAuxpowEnabled) {
+        return std::nullopt;
+    }
     const FlatFilePos pos{WITH_LOCK(cs_main, return index.GetBlockPos())};
     if (pos.nPos < STORAGE_HEADER_BYTES) {
         // Same real cases ReadRawBlock guards against: pruned or
@@ -1222,7 +1241,7 @@ std::optional<CBlockHeader> BlockManager::ReadBlockHeaderWithAuxPow(const CBlock
         // efficient partial read, matching the whole point of this
         // on-demand design.
         CBlockHeader header;
-        UnserializeBlockHeaderWithAuxPow(header, filein);
+        UnserializeBlockHeaderWithAuxPow(header, filein, /*auxpowEnabled=*/true); // guaranteed by the early return above
         return header;
     } catch (const std::exception& e) {
         LogError("Deserialize or I/O error - %s at %s while reading block header with auxpow", e.what(), pos.ToString());
@@ -1232,7 +1251,8 @@ std::optional<CBlockHeader> BlockManager::ReadBlockHeaderWithAuxPow(const CBlock
 
 FlatFilePos BlockManager::WriteBlock(const CBlock& block, int nHeight)
 {
-    const unsigned int block_size{static_cast<unsigned int>(GetSerializeSize(AuxPowBlockWithWitness(block)))};
+    const bool auxpowEnabled{GetConsensus().fBitAIAuxpowEnabled};
+    const unsigned int block_size{static_cast<unsigned int>(GetSerializeSize(AuxPowBlockForSend(block, auxpowEnabled)))};
     FlatFilePos pos{FindNextBlockPos(block_size + STORAGE_HEADER_BYTES, nHeight, block.GetBlockTime())};
     if (pos.IsNull()) {
         LogError("FindNextBlockPos failed for %s while writing block", pos.ToString());
@@ -1251,7 +1271,7 @@ FlatFilePos BlockManager::WriteBlock(const CBlock& block, int nHeight)
         fileout << GetParams().MessageStart() << block_size;
         pos.nPos += STORAGE_HEADER_BYTES;
         // Write block
-        fileout << AuxPowBlockWithWitness(block);
+        fileout << AuxPowBlockForSend(block, auxpowEnabled);
     }
 
     if (file.fclose() != 0) {

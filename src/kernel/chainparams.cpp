@@ -390,6 +390,7 @@ public:
         // after the height this milestone's audit work was done at (225823), per
         // docs/AUXPOW_MILESTONE.md sec.0/1. Enforced via CheckAuxPowRules()
         // (src/auxpow.h) from ContextualCheckBlockHeader.
+        consensus.fBitAIAuxpowEnabled = true;
         consensus.BitAIAuxpowActivationHeight = 227808;
 
         // Collision-free, generated-once network identity (see docs/CHAIN_IDENTITY.md).
@@ -812,6 +813,7 @@ public:
         // can exercise real AuxPoW block acceptance through the live
         // ContextualCheckBlockHeader path near genesis, exactly as every other
         // buried deployment already does on regtest.
+        consensus.fBitAIAuxpowEnabled = true;
         consensus.BitAIAuxpowActivationHeight = 1;
         consensus.MinBIP9WarningHeight = 0;
         consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};

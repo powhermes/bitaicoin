@@ -34,7 +34,12 @@ enum class TxVerbosity {
 CScript ParseScript(const std::string& s);
 std::string ScriptToAsmStr(const CScript& script, bool fAttemptSighashDecode = false);
 [[nodiscard]] bool DecodeHexTx(CMutableTransaction& tx, const std::string& hex_tx, bool try_no_witness = false, bool try_witness = true);
-[[nodiscard]] bool DecodeHexBlk(CBlock&, const std::string& strHexBlk);
+// `auxpowEnabled` is required, no default (docs/AUXPOW_MILESTONE.md sec.6):
+// callers must pass the real chain's Consensus::Params::fBitAIAuxpowEnabled
+// explicitly -- there is no safe way to infer, from the hex alone, whether
+// nVersion bit 8 means "an AuxPoW proof follows" on the chain this block is
+// meant for.
+[[nodiscard]] bool DecodeHexBlk(CBlock&, const std::string& strHexBlk, bool auxpowEnabled);
 bool DecodeHexBlockHeader(CBlockHeader&, const std::string& hex_header);
 
 [[nodiscard]] util::Result<int> SighashFromStr(const std::string& sighash);

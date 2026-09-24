@@ -5,7 +5,6 @@
 #ifndef BITCOIN_BLOCKENCODINGS_H
 #define BITCOIN_BLOCKENCODINGS_H
 
-#include <auxpow.h>
 #include <crypto/siphash.h>
 #include <primitives/block.h>
 
@@ -121,12 +120,24 @@ public:
 
     SERIALIZE_METHODS(CBlockHeaderAndShortTxIDs, obj)
     {
-        // AuxPoW addition: Using<AuxPowHeaderFormatter> carries any attached
-        // auxpow proof through the compact-block header field exactly like
-        // the plain generic serialize did for every other field -- see
-        // src/auxpow.h. Byte-for-byte identical to plain `obj.header` for
-        // any header with no auxpow attached.
-        READWRITE(Using<AuxPowHeaderFormatter>(obj.header), obj.nonce, Using<VectorFormatter<CustomUintFormatter<SHORTTXIDS_LENGTH>>>(obj.shorttxids), obj.prefilledtxn);
+        // AuxPoW addition, REVERTED to plain (2026-09-23,
+        // docs/AUXPOW_MILESTONE.md sec.6): `obj.header` is intentionally
+        // serialized with the ordinary, always-stock CBlockHeader format
+        // here, unconditionally, on every chain -- never an auxpow payload.
+        // This type's SERIALIZE_METHODS is a generic template with no chain
+        // context available to check (`Using<>()`'s static dispatch cannot
+        // carry a runtime "is AuxPoW enabled here" flag either), so it
+        // cannot safely decide "bit 8 means a proof follows" the way the
+        // chain-aware call sites elsewhere (auxpow.h's AuxPowBlockForSend/
+        // Recv, AuxPowHeadersForAnnounce) do. AuxPoW-flagged blocks are
+        // therefore deliberately never relayed via compact blocks (BIP152)
+        // on an AuxPoW-enabled chain -- see the real send-site gates in
+        // net_processing.cpp (ProcessGetData's CMPCTBLK branch and the
+        // announce-new-tip loop), which fall back to full, chain-aware
+        // BLOCK/HEADERS relay instead. A real, disclosed simplification
+        // (compact-block bandwidth savings do not apply to AuxPoW blocks),
+        // not a gap: nothing here can misinterpret bit 8 on any chain.
+        READWRITE(obj.header, obj.nonce, Using<VectorFormatter<CustomUintFormatter<SHORTTXIDS_LENGTH>>>(obj.shorttxids), obj.prefilledtxn);
         if (ser_action.ForRead()) {
             if (obj.BlockTxCount() > std::numeric_limits<uint16_t>::max()) {
                 throw std::ios_base::failure("indexes overflowed 16 bits");

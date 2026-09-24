@@ -315,6 +315,18 @@ static_assert((MakeAuxpowVersion(BITAI_AUXPOW_CHAIN_ID, 0) & AUXPOW_VERSIONBITS_
  * sec.0/4). Do not collapse the two: this function has no height parameter
  * and must not gain one.
  *
+ * CHAIN-AWARE, first (2026-09-23, docs/AUXPOW_MILESTONE.md sec.6): if
+ * `!params.fBitAIAuxpowEnabled`, this chain has no AuxPoW concept at all --
+ * `header.nVersion`'s bit 8 retains whatever ordinary historical meaning it
+ * has on that chain (nothing here), and the ONLY thing checked is the plain,
+ * unmodified `CheckProofOfWork(header.GetHash(), header.nBits, params)`,
+ * REGARDLESS of the header's own `IsAuxpow()`/`auxpow` state. This is the
+ * real fix for a found-in-review bug: earlier, this function dispatched on
+ * `header.IsAuxpow()` alone, with no chain check, which would have been
+ * WRONG on MAIN/TESTNET/TESTNET4/SIGNET-style chains (a header there with
+ * bit 8 set for unrelated reasons must never be treated as "carries an
+ * AuxPoW proof").
+ *
  * `CheckProofOfWorkImpl`/`CheckProofOfWork` (src/pow.h) remain exactly what
  * they always were -- the plain, low-level hash-vs-target primitive, with
  * NO knowledge of AuxPoW. This function is the header-aware DISPATCHER in
@@ -324,7 +336,7 @@ static_assert((MakeAuxpowVersion(BITAI_AUXPOW_CHAIN_ID, 0) & AUXPOW_VERSIONBITS_
  * CheckProofOfWork stays a plain hash/target check) -- not a new pattern
  * invented for this codebase.
  *
- * Semantics:
+ * Semantics, once `params.fBitAIAuxpowEnabled` is true:
  *   - DIRECT block (`header.IsAuxpow()` false): no proof required; the
  *     header's OWN hash must satisfy the header's OWN `nBits`, via the
  *     ordinary, unmodified `CheckProofOfWork`. Byte-for-byte the same
@@ -341,12 +353,12 @@ static_assert((MakeAuxpowVersion(BITAI_AUXPOW_CHAIN_ID, 0) & AUXPOW_VERSIONBITS_
  *     rejected here, at the cryptographic-validity layer, not deferred to
  *     policy.
  *
- * Safe to call unconditionally on every header, at every height, before
- * AuxPoW activation exists in any policy sense: no header can have the
- * AUXPOW bit set before real AuxPoW-producing code exists (there is none
- * yet -- GBT/mining wiring is a later, separate slice), so this is
- * byte-for-byte behavior-identical to a plain `CheckProofOfWork(header.
- * GetHash(), header.nBits, params)` call for every block that exists today.
+ * Safe to call unconditionally on every header, at every height, on any
+ * chain type: on an AuxPoW-disabled chain it is unconditionally
+ * behavior-identical to a plain `CheckProofOfWork(header.GetHash(),
+ * header.nBits, params)` call; on an AuxPoW-enabled chain before any real
+ * AuxPoW-producing code has ever run, no header can have the AUXPOW bit set
+ * in practice, so it is likewise behavior-identical there too.
  */
 bool CheckBitAIProofOfWork(const CBlockHeader& header, const Consensus::Params& params, BlockValidationState& state);
 
@@ -382,13 +394,24 @@ static constexpr size_t MAX_MERKLE_BRANCH_LENGTH = 32;
  * exact same order via the exact same primitive Serialize calls CBlockHeader
  * itself would use, and the auxpow payload is only ever touched when
  * `IsAuxpowVersion(nVersion)` is true.
+ *
+ * `auxpowEnabled` is REQUIRED (no default), by explicit design
+ * (docs/AUXPOW_MILESTONE.md sec.6): `IsAuxpowVersion(nVersion)` alone is
+ * NEVER a safe basis for deciding whether an auxpow payload follows -- bit 8
+ * has its ordinary historical meaning on any chain where AuxPoW is not a
+ * defined concept (MAIN/TESTNET/TESTNET4/SIGNET-style chains), and a header
+ * from one of those chains that happens to have bit 8 set for unrelated
+ * reasons must serialize/deserialize with EXACTLY the historical 80-byte
+ * format, never an auxpow payload. Every call site must pass this explicitly
+ * from `params.fBitAIAuxpowEnabled` -- there is no safe way to infer it from
+ * the header alone, which is why this isn't a defaulted parameter.
  */
 template <typename Stream>
-void SerializeBlockHeaderWithAuxPow(const CBlockHeader& header, Stream& s)
+void SerializeBlockHeaderWithAuxPow(const CBlockHeader& header, Stream& s, bool auxpowEnabled)
 {
     s << header.nVersion << header.hashPrevBlock << header.hashMerkleRoot
       << header.nTime << header.nBits << header.nNonce;
-    if (header.IsAuxpow()) {
+    if (auxpowEnabled && header.IsAuxpow()) {
         if (!header.auxpow) {
             throw std::ios_base::failure("SerializeBlockHeaderWithAuxPow: AUXPOW version bit set but no auxpow proof attached");
         }
@@ -397,11 +420,11 @@ void SerializeBlockHeaderWithAuxPow(const CBlockHeader& header, Stream& s)
 }
 
 template <typename Stream>
-void UnserializeBlockHeaderWithAuxPow(CBlockHeader& header, Stream& s)
+void UnserializeBlockHeaderWithAuxPow(CBlockHeader& header, Stream& s, bool auxpowEnabled)
 {
     s >> header.nVersion >> header.hashPrevBlock >> header.hashMerkleRoot
       >> header.nTime >> header.nBits >> header.nNonce;
-    if (header.IsAuxpow()) {
+    if (auxpowEnabled && header.IsAuxpow()) {
         auto proof = std::make_shared<CAuxPow>();
         s >> *proof;
         if (proof->vMerkleBranch.size() > MAX_MERKLE_BRANCH_LENGTH ||
@@ -410,6 +433,10 @@ void UnserializeBlockHeaderWithAuxPow(CBlockHeader& header, Stream& s)
         }
         header.auxpow = std::move(proof);
     } else {
+        // Either genuinely no proof attached, OR this chain has no AuxPoW
+        // concept at all -- in the latter case bit 8 (if set) is left alone
+        // in nVersion (its ordinary historical meaning is preserved
+        // untouched) but no payload is ever read for it.
         header.auxpow.reset();
     }
 }
@@ -445,11 +472,15 @@ void UnserializeBlockHeaderWithAuxPow(CBlockHeader& header, Stream& s)
  * net_processing.cpp's own real `TX_NO_WITNESS(*pblock)` /
  * `TX_WITH_WITNESS(*pblock)` call sites, rather than silently hardcoding
  * one and losing the other for AuxPoW blocks specifically.
+ *
+ * `auxpowEnabled` is REQUIRED, same rationale as
+ * SerializeBlockHeaderWithAuxPow above -- placed before `with_witness`
+ * (which keeps its default) since it is never safe to default.
  */
 template <typename Stream>
-void SerializeBlockWithAuxPow(const CBlock& block, Stream& s, bool with_witness = true)
+void SerializeBlockWithAuxPow(const CBlock& block, Stream& s, bool auxpowEnabled, bool with_witness = true)
 {
-    SerializeBlockHeaderWithAuxPow(block, s); // CBlock IS-A CBlockHeader
+    SerializeBlockHeaderWithAuxPow(block, s, auxpowEnabled); // CBlock IS-A CBlockHeader
     if (with_witness) {
         s << TX_WITH_WITNESS(block.vtx);
     } else {
@@ -458,9 +489,9 @@ void SerializeBlockWithAuxPow(const CBlock& block, Stream& s, bool with_witness 
 }
 
 template <typename Stream>
-void UnserializeBlockWithAuxPow(CBlock& block, Stream& s, bool with_witness = true)
+void UnserializeBlockWithAuxPow(CBlock& block, Stream& s, bool auxpowEnabled, bool with_witness = true)
 {
-    UnserializeBlockHeaderWithAuxPow(block, s);
+    UnserializeBlockHeaderWithAuxPow(block, s, auxpowEnabled);
     if (with_witness) {
         s >> TX_WITH_WITNESS(block.vtx);
     } else {
@@ -469,43 +500,60 @@ void UnserializeBlockWithAuxPow(CBlock& block, Stream& s, bool with_witness = tr
 }
 
 /**
- * Formatter for use with `Using<>()` at call sites that currently write
- * `TX_WITH_WITNESS(block)` / `TX_NO_WITNESS(block)` directly on a `CBlock`
- * (P2P BLOCK message send/receive, disk read/write) -- swaps in the
- * auxpow-aware functions above as a drop-in replacement. Two separate
- * formatter types (not a single parameterized one) because `Using<F>()`
- * takes a type, not a runtime value, matching how `TX_WITH_WITNESS`/
- * `TX_NO_WITNESS` are themselves two separate constants for the same reason.
+ * Send/receive wrapper objects carrying the block plus its explicit
+ * chain-awareness/witness flags, usable directly with `<<`/`>>` and
+ * `GetSerializeSize()` (via their own `Serialize`/`Unserialize` methods --
+ * the same pattern `AuxPowHeadersVectorWrapper` below already uses, NOT
+ * `Using<>()`: `Using<F>()` dispatches on a static TYPE, so it cannot carry
+ * a runtime `auxpowEnabled` bool the way these plain wrapper objects can).
+ * Replaced the earlier `AuxPowBlockWithWitness()`/`AuxPowBlockNoWitness()`
+ * `Using<>()`-based convenience wrappers (2026-09-23,
+ * docs/AUXPOW_MILESTONE.md sec.6): those had NO way to take a runtime
+ * chain-awareness parameter at all, so every call site silently assumed
+ * AuxPoW semantics applied -- correct on BitAIcoin/regtest, wrong on every
+ * other chain type. Every real call site now passes
+ * `params.fBitAIAuxpowEnabled` explicitly.
  */
-struct AuxPowBlockFormatterWithWitness {
+namespace detail {
+struct AuxPowBlockSerializer {
+    const CBlock& block;
+    bool auxpowEnabled;
+    bool with_witness;
     template <typename Stream>
-    static void Ser(Stream& s, const CBlock& block) { SerializeBlockWithAuxPow(block, s, /*with_witness=*/true); }
-    template <typename Stream>
-    static void Unser(Stream& s, CBlock& block) { UnserializeBlockWithAuxPow(block, s, /*with_witness=*/true); }
+    void Serialize(Stream& s) const { SerializeBlockWithAuxPow(block, s, auxpowEnabled, with_witness); }
 };
-struct AuxPowBlockFormatterNoWitness {
+struct AuxPowBlockDeserializer {
+    CBlock& block;
+    bool auxpowEnabled;
+    bool with_witness;
     template <typename Stream>
-    static void Ser(Stream& s, const CBlock& block) { SerializeBlockWithAuxPow(block, s, /*with_witness=*/false); }
-    template <typename Stream>
-    static void Unser(Stream& s, CBlock& block) { UnserializeBlockWithAuxPow(block, s, /*with_witness=*/false); }
+    void Unserialize(Stream& s) { UnserializeBlockWithAuxPow(block, s, auxpowEnabled, with_witness); }
 };
+} // namespace detail
+inline detail::AuxPowBlockSerializer AuxPowBlockForSend(const CBlock& block, bool auxpowEnabled, bool with_witness = true)
+{
+    return detail::AuxPowBlockSerializer{block, auxpowEnabled, with_witness};
+}
+inline detail::AuxPowBlockDeserializer AuxPowBlockForRecv(CBlock& block, bool auxpowEnabled, bool with_witness = true)
+{
+    return detail::AuxPowBlockDeserializer{block, auxpowEnabled, with_witness};
+}
 
-/** Convenience wrappers, mirroring TX_WITH_WITNESS(x)/TX_NO_WITNESS(x)'s own call shape. */
-template <typename T> auto AuxPowBlockWithWitness(T&& t) { return Using<AuxPowBlockFormatterWithWitness>(std::forward<T>(t)); }
-template <typename T> auto AuxPowBlockNoWitness(T&& t) { return Using<AuxPowBlockFormatterNoWitness>(std::forward<T>(t)); }
-
-/**
- * Formatter for use with `Using<>()` at call sites that serialize a plain
- * `CBlockHeader` field directly and need it to be auxpow-aware -- e.g.
- * `CBlockHeaderAndShortTxIDs::header` (BIP152 compact blocks,
- * src/blockencodings.h).
- */
-struct AuxPowHeaderFormatter {
-    template <typename Stream>
-    static void Ser(Stream& s, const CBlockHeader& header) { SerializeBlockHeaderWithAuxPow(header, s); }
-    template <typename Stream>
-    static void Unser(Stream& s, CBlockHeader& header) { UnserializeBlockHeaderWithAuxPow(header, s); }
-};
+// NOTE: the earlier `AuxPowHeaderFormatter` (for `Using<>()` on a bare
+// `CBlockHeader` field, e.g. BIP152 compact blocks) was REMOVED (2026-09-23,
+// docs/AUXPOW_MILESTONE.md sec.6), for the same reason: `Using<>()`'s
+// static-type dispatch cannot carry a runtime chain-awareness flag, and
+// `CBlockHeaderAndShortTxIDs::SERIALIZE_METHODS` (src/blockencodings.h) is a
+// generic template with no way to inject one either. Compact blocks
+// (BIP152) now use PLAIN, always-stock `CBlockHeader` serialization for
+// their header field -- byte-for-byte identical to upstream Bitcoin Core,
+// unconditionally, regardless of chain type or nVersion bit 8. AuxPoW-flagged
+// blocks are deliberately never relayed via compact blocks on an
+// AuxPoW-enabled chain (see the real send-site gates in net_processing.cpp);
+// they fall back to full BLOCK/HEADERS relay, both of which ARE correctly
+// chain-aware. This is a real, disclosed simplification (compact-block
+// bandwidth savings do not apply to AuxPoW blocks specifically), not a gap:
+// nothing about it can silently misinterpret bit 8 on any chain.
 
 /**
  * HEADERS-message (de)serialization, auxpow-aware, for
@@ -526,26 +574,32 @@ struct AuxPowHeaderFormatter {
  * would resize/loop before that check could run). The receive side is
  * fixed in place, in net_processing.cpp itself, by swapping only its
  * per-header deserialization call from the plain generic one to
- * `UnserializeBlockHeaderWithAuxPow` -- not by introducing a competing
- * mechanism here that would have to duplicate that size check to be safe.
+ * `UnserializeBlockHeaderWithAuxPow` (passing `auxpowEnabled` explicitly at
+ * that call site too) -- not by introducing a competing mechanism here that
+ * would have to duplicate that size check to be safe.
+ *
+ * `auxpowEnabled` is REQUIRED here as well, same rationale as the functions
+ * above -- a plain object (not `Using<>()`) precisely so it CAN carry this
+ * runtime flag.
  */
 namespace detail {
 struct AuxPowHeadersVectorWrapper {
     const std::vector<CBlockHeader>& headers;
+    bool auxpowEnabled;
     template <typename Stream>
     void Serialize(Stream& s) const
     {
         WriteCompactSize(s, headers.size());
         for (const auto& header : headers) {
-            SerializeBlockHeaderWithAuxPow(header, s);
+            SerializeBlockHeaderWithAuxPow(header, s, auxpowEnabled);
             WriteCompactSize(s, 0); // historical trailing tx-count=0, preserved exactly
         }
     }
 };
 } // namespace detail
-inline detail::AuxPowHeadersVectorWrapper AuxPowHeadersForAnnounce(const std::vector<CBlockHeader>& headers)
+inline detail::AuxPowHeadersVectorWrapper AuxPowHeadersForAnnounce(const std::vector<CBlockHeader>& headers, bool auxpowEnabled)
 {
-    return detail::AuxPowHeadersVectorWrapper{headers};
+    return detail::AuxPowHeadersVectorWrapper{headers, auxpowEnabled};
 }
 
 #endif // BITCOIN_AUXPOW_H

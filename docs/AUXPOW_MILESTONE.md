@@ -1066,6 +1066,84 @@ new tests); the new `feature_auxpow_prune.py` functional test green under the re
 binary via both direct invocation and `test_runner.py`. No half-life frozen. Existing history
 (225430-225823) confirmed untouched throughout.
 
-**Next: splice `CheckAuxPowRules()` into `ContextualCheckBlockHeader()` as its own commit**, per
-explicit authorization once these amendments and tests are green. ASERT dispatch and
+`CheckAuxPowRules()` was then spliced into `ContextualCheckBlockHeader()` as its own commit, per
+explicit authorization once the above amendments and tests were green. That splice itself then
+surfaced the cross-chain isolation gap fixed in sec.6 below, BEFORE proceeding to ASERT.
+
+## 6. Chain-awareness corrective pass (2026-09-23, before ASERT)
+
+**Real architectural gap found in review, not by a failing test:** every AuxPoW-aware code path
+(`CheckBitAIProofOfWork`'s dispatch, the auxpow-aware (de)serialization functions, net_processing's
+relay, node/blockstorage's disk I/O, the RPC/REST/core_io fixes from sec.5) inferred "this header
+carries a CAuxPow payload" directly from `nVersion` bit 8 (`IsAuxpowVersion()`), with **no chain-type
+check at all**. Correct on the real BitAIcoin chain (and REGTEST, used deliberately to test it) --
+**wrong** on ordinary MAIN/TESTNET/TESTNET4/SIGNET-style chains, where bit 8 is just an ordinary
+version bit with its own historical meaning. `BitAIAuxpowActivationHeight == INT_MAX` means
+"permanently pre-activation" (bit 8 still meaningful, just not yet allowed), **not** "AuxPoW does not
+exist here" -- a header on a disabled chain with bit 8 set for unrelated reasons would have been
+wrongly rejected as `auxpow-before-activation`, or worse, had its serialization corrupted.
+
+### Fix
+
+- **New `Consensus::Params::fBitAIAuxpowEnabled`** (bool, default `false`) -- the explicit, separate
+  enable flag the sentinel-height design was missing. `true` only for `ChainType::BITAICOIN` and
+  `REGTEST` (the latter deliberately, to keep testing AuxPoW there); `false` (the default) for
+  MAIN/TESTNET/TESTNET4/SIGNET and anything else.
+- **`CheckBitAIProofOfWork()`** now checks `!params.fBitAIAuxpowEnabled` FIRST, before ever looking at
+  `IsAuxpowVersion()`: on a disabled chain it is unconditionally the plain `CheckProofOfWork()`,
+  regardless of bit 8 or any attached proof.
+- **`ContextualCheckBlockHeader()`** now gates the entire `CheckAuxPowRules()` call behind
+  `consensusParams.fBitAIAuxpowEnabled`, not merely relying on the activation height -- on a disabled
+  chain, AuxPoW policy is skipped entirely rather than evaluated-and-passing.
+- **Every (de)serialization function require `auxpowEnabled` as an explicit, non-defaulted
+  parameter**: `SerializeBlockHeaderWithAuxPow`/`UnserializeBlockHeaderWithAuxPow`,
+  `SerializeBlockWithAuxPow`/`UnserializeBlockWithAuxPow`. On a disabled chain these are
+  byte-for-byte identical to plain `CBlockHeader`/`CBlock` serialization, unconditionally, even with
+  bit 8 set and a real proof attached.
+- **Removed the `Using<>()`-based `AuxPowBlockWithWitness()`/`AuxPowBlockNoWitness()`/
+  `AuxPowHeaderFormatter`**: `Using<>()` dispatches on a static type and cannot carry a runtime
+  chain-awareness flag. Replaced with plain wrapper objects (`AuxPowBlockForSend`/`AuxPowBlockForRecv`,
+  matching the pre-existing `AuxPowHeadersForAnnounce` pattern) that take `auxpowEnabled` explicitly at
+  every real call site (blockstorage.cpp's `WriteBlock`/`ReadBlock`, net_processing.cpp's BLOCK/HEADERS
+  send and receive, rpc/blockchain.cpp's `getblock`, core_io.cpp's `DecodeHexBlk` (now itself taking
+  `auxpowEnabled`, threaded from its two real callers), rest.cpp's JSON path).
+- **Compact blocks (BIP152) reverted to plain, always-stock header serialization**
+  (`CBlockHeaderAndShortTxIDs::SERIALIZE_METHODS`, blockencodings.h): that type's generic
+  `SERIALIZE_METHODS` has no chain context to check, so it can never safely decide "bit 8 means a
+  proof follows." AuxPoW-flagged blocks are now deliberately never relayed via compact blocks on an
+  AuxPoW-enabled chain (two real send-site gates added in net_processing.cpp), falling back to full,
+  chain-aware BLOCK/HEADERS relay instead -- a disclosed simplification (compact-block bandwidth
+  savings don't apply to AuxPoW blocks), not a gap.
+- **`LoadBlockIndexGuts()` and `GetHeaderForAnnounce()`** now gate on `fBitAIAuxpowEnabled` explicitly
+  before ever calling into the on-demand proof-read path, not just `IsAuxpowVersion()` -- otherwise a
+  disabled chain's stray bit-8-flagged entry would have been misdiagnosed as pruned/corrupted data for
+  a proof that was never expected to exist there.
+
+### Regression tests added (`src/test/auxpow_tests.cpp`)
+
+- `auxpow_enabled_flag_matches_the_desired_per_chain_state` -- direct assertion of the real per-chain
+  `fBitAIAuxpowEnabled` value against every chain type.
+- `disabled_chain_bit8_header_uses_ordinary_pow_check_not_auxpow_dispatch` -- proves dispatch
+  equivalence between `CheckBitAIProofOfWork` and plain `CheckProofOfWork` on MAIN for a bit-8-set
+  header with no proof attached.
+- `disabled_chain_serialization_stays_historical_no_auxpow_bytes_ever` -- a header with bit 8 set AND
+  a real, valid, attached proof still serializes to exactly 80 bytes when `auxpowEnabled=false`, and
+  deserializing leaves trailing wire bytes completely unconsumed (proving no attempt to read a
+  payload).
+- `ordinary_chains_are_byte_and_decision_compatible_with_upstream_including_bit8` -- for every one of
+  MAIN/TESTNET/TESTNET4/SIGNET, a representative header (including one with bit 8 set) serializes
+  byte-for-byte and validates decision-for-decision identically via the chain-aware path vs. the plain
+  stock path.
+- (B)/(C) -- AuxPoW-enabled pre-/post-activation behavior was already covered exhaustively elsewhere
+  in this file; not duplicated here.
+
+### Verified for real
+
+Full clean rebuild (bitaicoind + test_bitcoin); full unit test suite (792 cases, zero regressions, up
+from 788); `feature_auxpow_prune.py` green end to end with the chain-aware code active throughout;
+**a real node started on `-testnet4` (an AuxPoW-disabled chain) and confirmed to load its genesis
+index and answer RPCs normally** -- the first real, live exercise of the disabled-chain path in an
+actual running node, not just a unit test. Existing history (225430-225823) confirmed untouched.
+
+**Next: ASERT dispatch**, as its own separate consensus slice, now that this corrective pass is green.
 `createauxblock`/`submitauxblock` remain separate, later commits.

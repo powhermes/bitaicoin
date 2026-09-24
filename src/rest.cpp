@@ -457,8 +457,9 @@ static bool rest_block(const std::any& context,
             // getblock() (src/rpc/blockchain.cpp) and DecodeHexBlk()
             // (src/core_io.cpp) -- this REST JSON path was never updated to
             // the auxpow-aware formatter when AuxPoW's own serialization
-            // slice landed.
-            SpanReader{*block_data} >> AuxPowBlockWithWitness(block);
+            // slice landed. Now passes chainman.GetConsensus()'s real
+            // fBitAIAuxpowEnabled explicitly (sec.6).
+            SpanReader{*block_data} >> AuxPowBlockForRecv(block, chainman.GetConsensus().fBitAIAuxpowEnabled);
             UniValue objBlock = blockToJSON(chainman.m_blockman, block, *tip, *pblockindex, *tx_verbosity, chainman.GetConsensus().powLimit);
             std::string strJSON = objBlock.write() + "\n";
             req->WriteHeader("Content-Type", "application/json");
