@@ -1549,6 +1549,36 @@ BOOST_AUTO_TEST_CASE(ordinary_chains_are_byte_and_decision_compatible_with_upstr
 // re-litigate height-gate correctness already proven directly against
 // CheckAuxPowRules() elsewhere.
 
+// --- Residual gap found in the SAME review pass: the two real BIP152
+// compact-block eligibility gates in net_processing.cpp still branched on a
+// BARE IsAuxpow()/IsAuxpowVersion() bit-8 test, with no chain-awareness
+// check at all. On a disabled chain, an ordinary bit-8-set block would have
+// unnecessarily lost its normal compact-block eligibility. Fixed by
+// extracting the shared IsRealAuxpow(auxpowEnabled, nVersion) helper
+// (src/auxpow.h) both gates now use; tested here directly, since the gates
+// themselves are private, inline expressions inside PeerManagerImpl with no
+// standalone entry point of their own to call from a test.
+BOOST_AUTO_TEST_CASE(auxpow_enabled_chain_governs_real_auxpow_classification)
+{
+    const int32_t bit8SetVersion = MakeAuxpowVersion(BITAI_AUXPOW_CHAIN_ID, 4);
+    const int32_t bit8ClearVersion = 4;
+    BOOST_REQUIRE(IsAuxpowVersion(bit8SetVersion));
+    BOOST_REQUIRE(!IsAuxpowVersion(bit8ClearVersion));
+
+    // Disabled chain: a bit-8-set block must be classified IDENTICALLY to
+    // an otherwise-identical bit-8-clear block -- both "not real AuxPoW",
+    // both therefore equally eligible for ordinary compact-block relay.
+    BOOST_CHECK_EQUAL(IsRealAuxpow(/*auxpowEnabled=*/false, bit8SetVersion),
+                      IsRealAuxpow(/*auxpowEnabled=*/false, bit8ClearVersion));
+    BOOST_CHECK(!IsRealAuxpow(/*auxpowEnabled=*/false, bit8SetVersion));
+
+    // Enabled chain: the two versions must now be classified DIFFERENTLY --
+    // this is what makes the disabled-chain case above a real isolation
+    // proof rather than a vacuously-always-false helper.
+    BOOST_CHECK(IsRealAuxpow(/*auxpowEnabled=*/true, bit8SetVersion));
+    BOOST_CHECK(!IsRealAuxpow(/*auxpowEnabled=*/true, bit8ClearVersion));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // --- Item 5: the real AuxPoW transport + acceptance test, before splicing

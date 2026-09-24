@@ -197,6 +197,21 @@ public:
      * irrelevant to AuxPoW validation -- exactly backwards from how merge
      * mining is supposed to work. Fixed before any test was written around
      * the wrong version, not discovered by a failing test.
+     *
+     * PRECONDITION (chain-awareness audit, 2026-09-23,
+     * docs/AUXPOW_MILESTONE.md sec.7, category 2): this function assumes the
+     * caller has already established `params.fBitAIAuxpowEnabled` (its only
+     * two real call sites -- CheckAuxPowRules() and CheckBitAIProofOfWork()
+     * -- both gate on that flag before ever reaching here). It does NOT
+     * re-check it itself. Its own internal `IsAuxpowVersion(parentBlock.
+     * nVersion)` sanity check (auxpow.cpp, "auxpow-parent-is-auxpow") is a
+     * DIFFERENT, category-1 concern: `parentBlock` is a foreign PARENT
+     * CHAIN's header (e.g. real Bitcoin in a genuine merge-mining
+     * deployment), which has no `fBitAIAuxpowEnabled` concept of its own at
+     * all -- this is a pure structural "reject merge-mining of
+     * merge-mining" sanity check on that foreign header's bit 8, matching
+     * Namecoin/Dogecoin's own real-world reference behavior, not a
+     * chain-awareness gap.
      */
     bool Check(const uint256& hashAuxBlock, int32_t nChainId, uint32_t nBitsAux,
                const Consensus::Params& params, BlockValidationState& state) const;
@@ -260,6 +275,17 @@ using CAuxPowRef = std::shared_ptr<const CAuxPow>;
  *     AuxPoW is an additional accepted proof format, not a replacement that
  *     forbids direct mining. This function has nothing further to check in
  *     that case; ordinary `CheckProofOfWork` handles it as always.
+ *
+ * PRECONDITION (chain-awareness audit, 2026-09-23,
+ * docs/AUXPOW_MILESTONE.md sec.7, category 2): this function's own
+ * `IsAuxpowVersion(nVersion)` check has NO independent chain-awareness
+ * gate -- it relies entirely on its caller having already confirmed
+ * `params.fBitAIAuxpowEnabled`. Its one real call site
+ * (ContextualCheckBlockHeader(), src/validation.cpp) does exactly that; do
+ * not add a second real call site without adding the same gate there.
+ * (Direct calls from src/test/auxpow_tests.cpp are deliberate, controlled
+ * exercises of this function in isolation, not production call sites, and
+ * are exempt from this precondition by design.)
  */
 bool CheckAuxPowRules(int32_t nVersion, int nHeight, const uint256& hashHeader, uint32_t nBits,
                        const CAuxPow* auxpow, int32_t expectedChainId, int activationHeight,
@@ -272,6 +298,24 @@ bool CheckAuxPowRules(int32_t nVersion, int nHeight, const uint256& hashHeader, 
  * that CheckBitAIProofOfWork() below needs to reference it directly.
  */
 static constexpr int32_t BITAI_AUXPOW_CHAIN_ID = 16969;
+
+/**
+ * The single, shared "does this header ACTUALLY carry AuxPoW semantics"
+ * test (chain-awareness audit, 2026-09-23, docs/AUXPOW_MILESTONE.md sec.7):
+ * `IsAuxpowVersion(nVersion)` alone is bit 8's raw state and is NEVER
+ * sufficient on its own (see CheckBitAIProofOfWork()'s own doc comment).
+ * This combines it with `auxpowEnabled` once, in one place, specifically so
+ * every real behavioral-branch call site (currently: both BIP152
+ * compact-block eligibility gates in net_processing.cpp) uses the identical
+ * expression rather than each writing out `auxpowEnabled && IsAuxpowVersion(...)`
+ * by hand -- and so that expression has its own direct unit test
+ * (auxpow_enabled_chain_governs_real_auxpow_classification,
+ * src/test/auxpow_tests.cpp) independent of the call sites that use it.
+ */
+constexpr bool IsRealAuxpow(bool auxpowEnabled, int32_t nVersion)
+{
+    return auxpowEnabled && IsAuxpowVersion(nVersion);
+}
 
 /**
  * Local copies of src/versionbits.h's VERSIONBITS_TOP_BITS/VERSIONBITS_TOP_MASK

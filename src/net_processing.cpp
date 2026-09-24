@@ -2523,7 +2523,15 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             // "auxpow-missing" once reconstructed. Falls back to the full,
             // chain-aware BLOCK path instead, exactly like the existing
             // "peer asking for old blocks" fallback just above.
-            if (can_direct_fetch && pindex->nHeight >= tip->nHeight - MAX_CMPCTBLOCK_DEPTH && !pblock->IsAuxpow()) {
+            //
+            // `isActualAuxpow` -- NOT a bare pblock->IsAuxpow() (real gap
+            // found in review, 2026-09-23, docs/AUXPOW_MILESTONE.md sec.7):
+            // on a chain with fBitAIAuxpowEnabled == false, bit 8 has no
+            // AuxPoW meaning at all, and an ordinary bit-8-set block there
+            // must keep its normal compact-block eligibility rather than
+            // being unnecessarily downgraded to full-block relay.
+            const bool isActualAuxpow{IsRealAuxpow(auxpowEnabled, pblock->nVersion)};
+            if (can_direct_fetch && pindex->nHeight >= tip->nHeight - MAX_CMPCTBLOCK_DEPTH && !isActualAuxpow) {
                 if (a_recent_compact_block && a_recent_compact_block->header.GetHash() == inv.hash) {
                     MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, *a_recent_compact_block);
                 } else {
@@ -5991,7 +5999,14 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                 // site above (ProcessGetData) for the full rationale.
                 // Falls through to the `peer.m_prefers_headers` branch
                 // below, which uses the chain-aware AuxPowHeadersForAnnounce.
-                if (vHeaders.size() == 1 && state.m_requested_hb_cmpctblocks && !IsAuxpowVersion(pBestIndex->nVersion)) {
+                //
+                // `isActualAuxpow` -- NOT a bare IsAuxpowVersion() (real gap
+                // found in review, 2026-09-23, docs/AUXPOW_MILESTONE.md
+                // sec.7): on a chain with no AuxPoW concept, bit 8 must not
+                // cost an ordinary block its normal compact-block
+                // eligibility.
+                const bool isActualAuxpow{IsRealAuxpow(m_chainman.GetConsensus().fBitAIAuxpowEnabled, pBestIndex->nVersion)};
+                if (vHeaders.size() == 1 && state.m_requested_hb_cmpctblocks && !isActualAuxpow) {
                     // We only send up to 1 block as header-and-ids, as otherwise
                     // probably means we're doing an initial-ish-sync or they're slow
                     LogDebug(BCLog::NET, "%s sending header-and-ids %s to peer=%d\n", __func__,

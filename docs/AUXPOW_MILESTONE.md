@@ -1145,5 +1145,42 @@ from 788); `feature_auxpow_prune.py` green end to end with the chain-aware code 
 index and answer RPCs normally** -- the first real, live exercise of the disabled-chain path in an
 actual running node, not just a unit test. Existing history (225430-225823) confirmed untouched.
 
-**Next: ASERT dispatch**, as its own separate consensus slice, now that this corrective pass is green.
-`createauxblock`/`submitauxblock` remain separate, later commits.
+## 7. Residual compact-block isolation gap + full IsAuxpow()/IsAuxpowVersion() audit (2026-09-23)
+
+**One residual gap from sec.6**: the two real BIP152 compact-block eligibility gates in
+net_processing.cpp still branched on a bare `pblock->IsAuxpow()` / `IsAuxpowVersion(pBestIndex->
+nVersion)` -- pure bit-8 tests, no chain-awareness check. On a disabled chain, an ordinary bit-8-set
+block would have unnecessarily lost its normal compact-block eligibility (a real, if minor,
+correctness bug -- not a crash/corruption risk like sec.6's gaps, but still a bare bit-8 branch this
+whole pass exists to eliminate).
+
+**Fix**: extracted a single shared `IsRealAuxpow(auxpowEnabled, nVersion)` helper (`src/auxpow.h`) --
+`auxpowEnabled && IsAuxpowVersion(nVersion)` -- and both compact-block gates now use it instead of
+writing the expression out by hand.
+
+**Full audit of every remaining `IsAuxpow()`/`IsAuxpowVersion()` use**, classified:
+1. **Pure encoding/helper use, no chain context needed**: `CAuxPow::Check()`'s own internal check that
+   the PARENT chain's header doesn't itself have bit 8 set (`auxpow-parent-is-auxpow`) -- the parent is
+   a foreign chain's header (e.g. real Bitcoin) with no `fBitAIAuxpowEnabled` concept of its own; this
+   is a pure "reject merge-mining of merge-mining" structural sanity check, matching Namecoin/
+   Dogecoin's own real-world reference behavior. Documented explicitly at `CAuxPow::Check()`'s
+   declaration.
+2. **AuxPoW-enabled consensus code, precondition established by the caller**: `CheckAuxPowRules()`'s
+   internal `isAuxpow` check (its one real call site, `ContextualCheckBlockHeader()`, already gates on
+   `fBitAIAuxpowEnabled`) and `CheckBitAIProofOfWork()`'s internal `header.IsAuxpow()` check (gated by
+   its own `!params.fBitAIAuxpowEnabled` early-return earlier in the same function). Both now carry an
+   explicit PRECONDITION doc comment at their declaration.
+3. **Behavioral branches requiring explicit chain awareness**: `GetHeaderForAnnounce()`,
+   `LoadBlockIndexGuts()`'s PoW-recheck, the four (de)serialization functions, and the two compact-block
+   gates -- all already fixed (sec.6 and this section).
+
+New regression test: `auxpow_enabled_chain_governs_real_auxpow_classification` -- proves
+`IsRealAuxpow()` classifies a bit-8-set header IDENTICALLY to an otherwise-identical bit-8-clear
+header when disabled (both "not real AuxPoW", both equally compact-block-eligible), and DIFFERENTLY
+when enabled (proving the disabled-chain case isn't merely a vacuously-always-false helper).
+
+**Verified for real**: full clean rebuild; full unit test suite (793 cases, zero regressions, up from
+792); `feature_auxpow_prune.py` green end to end.
+
+**Next: ASERT dispatch**, as its own separate consensus slice, now that this corrective pass is fully
+green. `createauxblock`/`submitauxblock` remain separate, later commits.
