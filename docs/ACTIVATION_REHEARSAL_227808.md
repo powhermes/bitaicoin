@@ -2,12 +2,16 @@
 
 **Status: IN PROGRESS.** This document is being built incrementally as the rehearsal proceeds.
 Sections marked `PENDING` have not happened yet and contain no fabricated data -- per the governing
-instruction, no 227807/227808+ result is recorded before it actually exists. As of this revision: the
-real 225823->227807 canonical mining run, its full provenance verification, the immutable
+instruction, no 227808+ result is recorded before it actually exists. As of this revision: the real
+225823->227807 canonical mining run, its full provenance verification, the immutable
 golden-227807-pre-activation snapshot and its independent verification, the obsolete node D
-pre-activation compatibility record, and the ASERT-vs-legacy computation for 227808 are all complete
-and real (sec.6-7.1). Canonical node A is now stopped and treated as read-only evidence. **227808 has
-not been mined by anything yet** -- Scenario A and Scenario B (sec.8) remain deliberately not started.
+pre-activation compatibility record, the ASERT-vs-legacy computation for 227808 (corrected
+interpretation, sec.6.2), and **both Scenario A (direct) and Scenario B (AuxPoW) at the real 227808
+activation boundary -- including both obsolete-node observations and the structural A/B comparison --
+are now all complete and real (sec.6-12), and both PASS.** Canonical node A, both scenario nodes, and
+all D observation instances are stopped and preserved as read-only evidence. Multi-node
+convergence/reorg testing and everything past it (sec.13) remain deliberately not started, pending
+review of this report.
 
 ## 0. Purpose
 
@@ -478,36 +482,248 @@ needed. D's own datadir (now at real height 227807, obsolete binary) is preserve
 post-activation divergence test in Scenario A/B/convergence (sec.12+), where D is expected to
 continue accepting direct-mined blocks normally but be unable to validate an AuxPoW-versioned block.
 
-## 8. Pending sections (will be completed once Scenario A/B begin)
+## 9. Scenario A: first activation block, DIRECT (227808)
+
+Run against `scenario-A-direct/` only -- a pristine, untouched clone of `golden-227807-pre-activation`
+(never node A itself, never reused for Scenario B).
+
+**Pre-mining verification** (before any mining): height 227807, best hash
+`000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f` (exact match to sec.7), 227807's
+own bits `1d0fffff`, `getblockhash(227808)` correctly errored (`-8 Block height out of range`), zero
+peers.
+
+**Live integration confirmation, before solving anything**: a real `getblocktemplate` call against
+this node returned, on its own, with no consensus code touched and nothing computed offline:
+`height=227808`, `bits=1d0fb6d7`, `previousblockhash=<the golden 227807 hash>`,
+`target=0000000fb6d70000...0000`. This is the exact ASERT value independently computed in sec.6.2 --
+**confirmed live, from the real node's own `GetNextWorkRequired()`, not merely predicted.** It did
+**not** return the legacy value `0x1d065805`. Since the template already matched, no "fix" was needed
+or performed.
+
+**Mined exactly one block (227808), directly** (`generatetoaddress`, no consensus code touched):
+
+| field | value |
+|---|---|
+| hash | `000000077fbb8bbec7664628a710a3818caa15238a4408d4247834c8dbd5f715` |
+| height | 227808 |
+| version | `536870912` / `0x20000000` (VERSION_AUXPOW bit **unset**) |
+| previousblockhash | `000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f` (exactly the golden 227807 hash) |
+| bits | `1d0fb6d7` |
+| target | `0000000fb6d70000000000000000000000000000000000000000000000000000` |
+| time | `1790301665` |
+| mediantime | `1790268591` |
+| nonce | `47956273` |
+| chainwork | `00000000000000000000000000000000000000000000002e45f80fc09449597b` |
+| difficulty | `0.06363566626887295` |
+| coinbase | `03e0790300` (height push `0x0379e0` = 227808, correct) |
+| subsidy | 25 BAIC |
+
+**Verified**: accepted; height 227808; prevhash exactly the golden 227807 hash; `bits == 1d0fb6d7`
+exactly; VERSION_AUXPOW bit unset; no AuxPoW proof attached (verbosity-2 `getblock` shows a single
+plain coinbase tx, no `auxpow` field); PoW valid against the ASERT target (the node's own validation
+accepted the block -- it would have rejected an invalid-PoW header outright); `getblock`/`getblockheader`
+agree on hash/height/version/bits/target/time/mediantime/nonce/chainwork exactly; chainwork increase
+is consistent with the ASERT target (difficulty ratio 227808/227807 = `0.06363566626887295 /
+0.06249910592947572` = **1.0181852256**, matching the independently-computed ASERT prediction
+**1.018185** to 6 significant figures); a real stop+restart of this node reproduced the identical
+227808 tip exactly (same height, hash, bits, chainwork). 227809 was **not** mined -- not required by
+the documented checks.
+
+**Comparison against both precomputed possibilities**: the real node used `0x1d0fb6d7`. It did
+**not** use `0x1d065805`. **This is real network-level integration evidence** (not a unit test) that
+the ASERT branch in `GetNextWorkRequired()` supersedes the legacy 2016-block retarget at the exact
+real production activation boundary, exactly as the frozen gating order in `src/pow.cpp:52-53`
+specifies.
+
+### 9.1 Obsolete node D vs. Scenario A's DIRECT 227808 block
+
+D's preserved, real, P2P-synced 227807 state (sec.7.1) was reused for this observation, then
+preserved again afterward as an immutable `golden-D-227807-obsolete` snapshot (confirmed to have
+never advanced past 227807 -- no on-disk chain-state write ever occurred from this observation) so
+later observations always restore from a clean copy rather than reusing a possibly-stateful instance.
+D was connected **only** to Scenario A's node (never any other peer).
+
+Real, observed result (not assumed):
+
+| check | result |
+|---|---|
+| header accepted/rejected | **REJECTED** |
+| block accepted/rejected | rejected (header rejection means the block itself was never requested/downloaded) |
+| debug reject reason (exact log line) | `[validation] AcceptBlockHeader: Consensus::ContextualCheckBlockHeader: 000000077fbb8bbec7664628a710a3818caa15238a4408d4247834c8dbd5f715, bad-diffbits, incorrect proof of work` followed by `[net] Misbehaving: peer=0: invalid header received` |
+| D height | unchanged: 227807 |
+| D best hash | unchanged: `000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f` |
+| D getchaintips | a single tip, unchanged: `{"height": 227807, "hash": "000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f", "status": "active"}` -- the rejected header was not even retained as a headers-only branch |
+| last common block | 227807 (the golden hash) |
+| peer disconnect | none -- D logs `[warning] Not punishing manually connected peer 0!` (manually-added peers are never banned/disconnected on misbehavior, by design) |
+
+**Real finding, confirmed by exact log line, not assumed**: even though this is a *direct*-mined
+block (no AuxPoW involved at all), D still rejects it -- specifically via
+`ContextualCheckBlockHeader`'s **`bad-diffbits`** check, because D's own (pre-ASERT) `GetNextWorkRequired()`
+independently computes the legacy value `0x1d065805` for height 227808 and compares it against the
+block's actual declared `0x1d0fb6d7`, finding a mismatch. This confirms the exact mechanism predicted
+in sec.6.2: **the consensus split at 227808 is visible to an obsolete node purely from the difficulty
+computation itself, even before AuxPoW's own serialization/versioning is ever considered.**
+
+## 10. Scenario B: first activation block, AuxPoW (227808)
+
+Run independently against `scenario-B-auxpow/` only -- confirmed to have never inherited Scenario A's
+227808 state (started completely fresh from the golden snapshot, on its own ports).
+
+**Pre-mining verification**: height 227807, hash `000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f`
+(exact match to sec.7), `getblockhash(227808)` correctly errored, zero peers.
+
+**`createauxblock` result, asserted BEFORE any parent work (per instruction -- code would stop, not
+"fix," on any mismatch)**:
+- returned height = **227808** -- matches
+- returned chain ID = **16969** -- matches
+- returned bits = **`1d0fb6d7`** -- matches
+- returned numeric target (both the raw `target` hex field and the bits-derived target, cross-checked
+  against each other) = **exactly** the same ASERT target independently computed in sec.6.2 and live-
+  confirmed by Scenario A's own `getblocktemplate` -- matches exactly
+
+All four checks passed; no divergence, so mining proceeded (nothing was "fixed").
+
+**Mined via the frozen reference coordinator** (`createauxblock` -> synthetic parent -> real SHA256d
+solve of the parent against the BAIC target -> `CAuxPow` -> `submitauxblock`):
+
+| field | value |
+|---|---|
+| `submitauxblock` result | `accepted` |
+| hash (child) | `551982b3837caf9482f5b85da5c607d808483c3938b96ab0449ac172238ef0cd` |
+| height | 227808 |
+| version | `1112080640` / `0x42490100` (VERSION_AUXPOW bit **set**) |
+| encoded chain ID | 16969 (consistent with `createauxblock`'s own returned chain ID; enforced by the coordinator's real wire encoding, not asserted separately here since `createauxblock`'s value was already checked above and the same job object was used to build the submission) |
+| previousblockhash | `000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f` (exactly the golden 227807 hash) |
+| bits | `1d0fb6d7` |
+| target | `0000000fb6d70000000000000000000000000000000000000000000000000000` |
+| time | `1790301957` |
+| mediantime | `1790268591` |
+| chainwork | `00000000000000000000000000000000000000000000002e45f80fc09449597b` |
+| coinbase | `03e0790300` |
+| subsidy | 25 BAIC |
+
+**Verified**: `submitauxblock` returned `accepted`; node tip became exactly `createauxblock`'s
+predicted child hash; child height 227808; child `bits == 1d0fb6d7`; VERSION_AUXPOW **set**; encoded
+chain ID 16969; the proof passed the node's own normal validation (accepted, not merely "not yet
+rejected"); `getblock`/`getblockheader` agree; a real stop+restart reproduced the identical 227808
+AuxPoW tip exactly.
+
+**Chainwork cross-check against Scenario A (explicit "no work bonus/penalty" requirement)**:
+Scenario A (direct) chainwork at 227808 = `...2e45f80fc09449597b`. Scenario B (AuxPoW) chainwork at
+227808 = `...2e45f80fc09449597b`. **Identical, exactly.** The proof mechanism (direct vs. AuxPoW)
+does not influence chainwork/difficulty in any way.
+
+### 10.1 Obsolete node D vs. Scenario B's AuxPoW 227808 block
+
+Per instruction, D was **not** reused from the 9.1 observation. A fresh clone was made from the
+immutable `golden-D-227807-obsolete` snapshot (created in 9.1, confirmed untouched -- still real
+height 227807) into a new, separate `D-vs-scenario-B/` directory, then connected **only** to
+Scenario B's node.
+
+Real, observed result (not assumed, and explicitly checked for whether it differs from 9.1's
+mechanism rather than assumed identical):
+
+| check | result |
+|---|---|
+| header accepted/rejected | **REJECTED** |
+| block accepted/rejected | rejected (header rejection; block never requested) |
+| debug reject reason (exact log line) | `[net] Misbehaving: peer=0: header with invalid proof of work` -- notably **no** `AcceptBlockHeader: Consensus::ContextualCheckBlockHeader: ..., bad-diffbits` line this time |
+| D height | unchanged: 227807 |
+| D best hash | unchanged: `000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f` |
+| D getchaintips | a single tip, unchanged, identical to 9.1's | 
+| last common block | 227807 (the golden hash) |
+| peer disconnect | none (same manual-peer no-punishment behavior as 9.1) |
+
+**Real finding, genuinely distinct from 9.1 -- recorded exactly, not summarized as "same as before"**:
+the reject reason's *log-line shape* differs from Scenario A's. Scenario A's direct block was rejected
+by the **named** `ContextualCheckBlockHeader` / `bad-diffbits` check (the header's own declared
+`nBits` failed D's independent recomputation of the *expected* value). Scenario B's AuxPoW block was
+rejected by an **earlier, more generic** check -- `"header with invalid proof of work"`, with no
+`bad-diffbits` label and no offending hash printed -- consistent with D's basic, pre-AuxPoW
+`CheckProofOfWork()` evaluating the header's *own* hash against its declared target directly (as
+every pre-AuxPoW header is validated), which fails for a real AuxPoW block: the child header's own
+hash was never engineered to satisfy the target by itself -- only the *synthetic parent's* hash was
+solved, per the merge-mining design -- so a binary with no AuxPoW-aware validation code necessarily
+sees the child header as carrying "invalid proof of work," independent of and prior to any
+diffbits/expected-value comparison. (The received `headers` message was also larger -- 398 bytes vs.
+163 bytes for Scenario A's -- consistent with the AuxPoW block's header carrying the serialized
+`CAuxPow` proof, which the obsolete binary parses far enough to attempt a proof-of-work check on, but
+does not understand.) Both blocks are correctly rejected by D, but for two different, real,
+independently-confirmed reasons -- exactly the kind of distinction this rehearsal exists to surface
+rather than assume.
+
+## 11. Structural comparison: Scenario A vs. Scenario B
+
+| property | Scenario A (direct) | Scenario B (AuxPoW) | equal? |
+|---|---|---|---|
+| block hash | `000000077fbb8bbec7664628a710a3818caa15238a4408d4247834c8dbd5f715` | `551982b3837caf9482f5b85da5c607d808483c3938b96ab0449ac172238ef0cd` | **No** (expected -- different coinbase/proof) |
+| parent height | 227807 | 227807 | **Yes** |
+| prevhash | `000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f` | `000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f` | **Yes** |
+| nBits | `1d0fb6d7` | `1d0fb6d7` | **Yes** |
+| chainwork increment | `...2e45f80fc09449597b` | `...2e45f80fc09449597b` | **Yes, identical** |
+
+**Confirmed**: the proof mechanism (direct vs. AuxPoW) has zero influence on required difficulty or
+resulting chainwork -- both real, independently-mined 227808 blocks, from two completely separate
+golden-snapshot clones, received exactly the same ASERT-computed target and produced exactly the same
+chainwork increment.
+
+## 12. Result: both Scenario A and Scenario B pass; expected conditions met
+
+| condition | expected | observed |
+|---|---|---|
+| Scenario A (direct) | 227808 accepted with `1d0fb6d7` | **accepted with `1d0fb6d7`** -- matches |
+| Scenario B (AuxPoW) | 227808 accepted with `1d0fb6d7` | **accepted with `1d0fb6d7`** -- matches |
+
+Neither scenario failed or differed from the expected upgraded-node conditions. Per instruction, this
+means the rehearsal may proceed to the multi-node convergence/reorg phase in a future session -- not
+run automatically in this same pass; report delivered first (see chat).
+
+Both obsolete-node observations (9.1, 10.1) surfaced real, distinct, correctly-rejecting behavior --
+consistent with (not merely assumed to be) a genuine consensus fork at 227808 for a node running the
+obsolete binary, for two different underlying reasons depending on the proof mechanism used.
+
+## 13. Pending sections (will be completed once convergence/reorg testing begins)
 
 All tooling below is written and ready in `~/Downloads/bitaicoin-rehearsal-lab/` -- each script is a
 real, runnable implementation (not a placeholder), verified to import/parse correctly. The
 225823->227807 canonical run, its provenance verification, the golden-227807 snapshot, its
-independent verification, D's pre-activation record, and the ASERT-vs-legacy computation for 227808
-(sec.6-7.1) are now all real, complete, and PASS. Everything below sec.6-7.1 has not been RUN against
-real 227808+ data yet -- that is Scenario A/B's own job, deliberately not started until this report is
-delivered and reviewed, per instruction. No result for any of the following exists yet; none will be
-fabricated or assumed:
+independent verification, D's pre-activation record, the ASERT-vs-legacy computation for 227808, and
+now both Scenario A (direct) and Scenario B (AuxPoW) at the real 227808 activation boundary --
+including both obsolete-node observations and the structural A/B comparison -- (sec.6-12) are all
+real, complete, and PASS. Multi-node convergence/reorg testing (sec.13's remaining items) has not
+been run yet -- deliberately not started until this report is delivered and reviewed, per instruction.
+No result for any of the following exists yet; none will be fabricated or assumed:
 
 | item | script | status |
 |---|---|---|
 | shared node/RPC config | `lab_common.py` | ready |
 | 227807 snapshot capture + verification | sec.7 | **DONE -- PASS** |
 | D pre-activation compatibility record | sec.7.1 | **DONE -- PASS** |
-| ASERT anchor computation + legacy-vs-ASERT comparison for 227808 | sec.6.2 | **DONE** (computed, not mined) |
+| ASERT anchor computation + legacy-vs-ASERT comparison for 227808 (corrected interpretation) | sec.6.2/6.2a | **DONE -- PASS** (computed, then live-confirmed by real `getblocktemplate` in sec.9) |
 | Automated 1,984-block provenance verification | sec.6.3 | **DONE -- PASS** |
-| Scenario A: first activation block, DIRECT | `scenario_A_direct.py` | ready, PENDING run |
-| Scenario B: first activation block, AuxPoW | `scenario_B_auxpow.py` | ready, PENDING run |
+| Scenario A: first activation block, DIRECT | sec.9 (custom precise run, `scenario_A_direct.py` reviewed but not used as-is -- see note below) | **DONE -- PASS** |
+| Obsolete node D vs. Scenario A | sec.9.1 | **DONE** -- real rejection, `bad-diffbits` |
+| Scenario B: first activation block, AuxPoW | sec.10 (`run_scenario_b.py`, built on the frozen coordinator; `scenario_B_auxpow.py` reviewed but not used as-is) | **DONE -- PASS** |
+| Obsolete node D vs. Scenario B | sec.10.1 | **DONE** -- real rejection, distinct reason (`header with invalid proof of work`) |
+| Structural A vs. B comparison | sec.11 | **DONE -- PASS** (identical parent/prevhash/bits/chainwork, different hash) |
 | Three-upgraded-node convergence (A/B/C) | `scenario_convergence.py` | ready, PENDING run |
 | Competing-branch/reorg test | `scenario_reorg.py` | ready (base case; differing-anchor variant is a documented follow-up), PENDING run |
-| ASERT dynamic verification (real heights, independent reference) | `scenario_asert_compare.py` | ready, PENDING run (sec.6.2's offline computation still needs on-node RPC confirmation at real 227808) |
+| ASERT dynamic verification (real heights, independent reference) | `scenario_asert_compare.py` | superseded by sec.9's live `getblocktemplate` confirmation; may still be run for the differing-anchor/BIP34-boundary follow-up cases |
 | BIP34 boundary (227931) crossing | `scenario_bip34.py` | ready, PENDING run |
 | Restart/reindex matrix | `scenario_restart_matrix.py` | ready, PENDING run at each required height |
 | HEADERS-first synchronization | `scenario_headers_sync.py` | ready, PENDING run |
 | Pruning rehearsal | `scenario_pruning_plan.py` | ready; includes an honest feasibility check against the real 550 MiB prune floor, with `feature_auxpow_prune.py` as the documented fallback authority if infeasible at these heights |
-| Obsolete-node (D) post-activation divergence | `scenario_obsolete_node_D.py` | ready, PENDING run (D's pre-activation state is now recorded, sec.7.1) |
+| Obsolete-node (D) further divergence (convergence/reorg phase) | `scenario_obsolete_node_D.py` | ready, PENDING run (D's pre- and post-activation-boundary behavior against both proof mechanisms is now recorded, sec.7.1/9.1/10.1) |
 | Upgrade gate statement | (sec.15 of the spec) | PENDING |
 | Post-activation stabilization checkpoint candidate | (sec.16 of the spec) | PENDING |
-| Discrepancies found, if any | | none found in consensus code so far; mining-harness bugs found and fixed are documented in sec.5; the legacy-vs-ASERT divergence at 227808 (sec.6.2) is expected designed behavior, not a discrepancy |
+| Discrepancies found, if any | | none found in consensus code; mining-harness bugs found and fixed are documented in sec.5; the legacy-vs-ASERT divergence at 227808 (sec.6.2) and both obsolete-node rejections (sec.9.1/10.1) are expected designed behavior, not discrepancies |
+
+Note on sec.9/10: the existing `scenario_A_direct.py`/`scenario_B_auxpow.py` scripts (written earlier
+in the rehearsal, sec.7 of the pending table before this revision) mine extra continuity blocks
+(227809/227810) and do not perform a pre-mining `getblocktemplate`/`createauxblock` assertion gate.
+Per explicit instruction for this specific run, sec.9/10 were executed via new, narrower scripts
+(`run_scenario_b.py` for B; direct RPC calls for A) that perform exactly the specified pre-mining
+assertions and stop after exactly one block. The original two scripts remain available, unmodified,
+for a future full continuity/multi-block run if wanted.
 
 **No result for any item still marked PENDING above exists yet. None will be fabricated or assumed.**
