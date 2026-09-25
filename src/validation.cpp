@@ -5167,9 +5167,27 @@ void ChainstateManager::LoadExternalBlockFile(
                     const CBlockIndex* pindex = m_blockman.LookupBlockIndex(hash);
                     if (!pindex || (pindex->nStatus & BLOCK_HAVE_DATA) == 0) {
                         // This block can be processed immediately; rewind to its start, read and deserialize it.
+                        //
+                        // AuxPoW fix (read-path defect found during activation rehearsal): this used to be
+                        // plain `blkdat >> TX_WITH_WITNESS(*pblock);`, which never reads a trailing CAuxPow
+                        // proof regardless of the header's own VERSION_AUXPOW bit or this chain's
+                        // fBitAIAuxpowEnabled. Every other block-read call site (BlockManager::ReadBlock,
+                        // net_processing's P2P receive, rest.cpp, core_io.cpp) already uses the chain-aware
+                        // AuxPowBlockForRecv wrapper (src/auxpow.h) -- this was the one site that did not.
+                        // The on-disk bytes were always correct and complete (BlockManager::WriteBlock
+                        // always writes via the matching AuxPowBlockForSend); only this reindex/-loadblock
+                        // read path (the only two callers of LoadExternalBlockFile, node/blockstorage.cpp's
+                        // ImportBlocks) failed to reconstruct the in-memory CBlock's auxpow field, which
+                        // then correctly (from CheckBlockHeader's own narrow perspective) failed its own
+                        // "auxpow-missing" consensus check -- silently truncating the reindexed chain at
+                        // the first AuxPoW block. On any chain where fBitAIAuxpowEnabled is false (MAIN/
+                        // TESTNET/TESTNET4/SIGNET), AuxPowBlockForRecv's own internal
+                        // `if (auxpowEnabled && header.IsAuxpow())` gate (src/auxpow.h) means this is
+                        // byte-for-byte identical to the previous plain read -- bit 8 keeps its ordinary
+                        // historical meaning there and no proof payload is ever attempted.
                         blkdat.SetPos(nBlockPos);
                         pblock = std::make_shared<CBlock>();
-                        blkdat >> TX_WITH_WITNESS(*pblock);
+                        blkdat >> AuxPowBlockForRecv(*pblock, GetConsensus().fBitAIAuxpowEnabled);
                         nRewind = blkdat.GetPos();
 
                         BlockValidationState state;
