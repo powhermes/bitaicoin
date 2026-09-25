@@ -4,15 +4,20 @@
 Sections marked `PENDING` have not happened yet and contain no fabricated data -- per the governing
 instruction, no result is recorded before it actually exists. As of this revision: the real
 225823->227807 canonical mining run, the 227807 snapshot, Scenario A/B at the real activation
-boundary (sec.6-12), and the **full upgraded-node convergence/reorg/branch-local-ASERT phase --
-three-node mixed direct/AuxPoW convergence, a same-anchor activation-crossing reorg, a
-reverse-composition reorg, a branch-local ASERT anchor test with an anchor-leakage check and a
-wrong-bits subtest, and independent chainwork verification (sec.14-21)** -- are all complete, real,
-and PASS. Every node used in this phase is stopped; the preserved evidence from earlier phases
-(canonical node A, both golden snapshots, both scenario datadirs) was never reused or mutated. Per
-instruction, this phase stops here -- BIP34 height 227931, full fresh-node HEADERS sync, pruning, and
-stabilization-checkpoint selection (sec.22) remain deliberately not started, pending review of this
-report.
+boundary (sec.6-12), the full upgraded-node convergence/reorg/branch-local-ASERT phase (sec.14-21,
+reviewed and approved, including a literal opposite-composition reorg added in review, sec.18.1), and
+now **the real BIP34 height 227931 boundary rehearsal (sec.23)** -- a fresh 121-block gap mined
+honestly to 227928, the real BIP34Height parameter and its exact enforcement semantics confirmed from
+source, a normal direct+AuxPoW sequence across the boundary, a wrong-child-height rejection
+(`bad-cb-height`) immediately after activation, the matching pre-activation control (accepted, no
+enforcement yet), DAA/chainwork continuity across the boundary, restart persistence, and a reorg
+crossing 227931 -- are all complete, real, and PASS. Every node used in every phase is stopped; the
+preserved evidence from earlier phases (canonical node A, both golden 227807/227928 snapshot sources,
+both Scenario A/B datadirs) was never reused or mutated. One honest, non-blocking finding is disclosed
+in sec.23.2 (ASERT's fixed anchor causes real, expected difficulty growth when a gap is mined faster
+than nominal spacing -- not a bug, not fixed). Per instruction, this phase stops here -- full
+fresh-node HEADERS sync, pruning, and stabilization-checkpoint selection (sec.24) remain deliberately
+not started, pending review of this report.
 
 ## 0. Purpose
 
@@ -831,13 +836,17 @@ survives restart. (`getchaintips` also lists many `valid-headers` entries at hei
 these are pre-existing orphaned side-headers inherited from the original 10-way parallel canonical
 mining run, sec.5/6, harmless and unrelated to this reorg.)
 
-## 18. Reverse proof-mechanism dominance (item 7)
+## 18. Reverse branch identity / independent composition reorg (item 7)
 
-Fresh clones (`reorgrev-X`, `reorgrev-Y`), disconnected, with the composition **reversed** from sec.17:
-this time the eventual *winner* is AuxPoW-heavy and has *more* blocks, and the loser is direct-heavy
-with *fewer* blocks -- the opposite pairing from sec.17 (there, the winner Y was also AuxPoW-heavy;
-here the letter and the "more blocks" side both flip relative to which one is being tested as
-AuxPoW-heavy, decoupling any accidental pattern).
+**Naming correction**: this section's test changed which node/letter won and used an independently
+chosen composition, but its winning branch was still AuxPoW-heavy (2 AuxPoW + 1 direct, vs. the
+loser's 1 direct + 1 AuxPoW) -- not the literal opposite composition from sec.17 (also an AuxPoW-heavy
+winner). Renamed accordingly to avoid overclaiming; sec.18.1 below adds the literal opposite-composition
+case (direct-heavy winner vs. AuxPoW-heavy loser), closing the symmetry gap precisely.
+
+Fresh clones (`reorgrev-X`, `reorgrev-Y`), disconnected, with the branch identity/composition chosen
+independently of sec.17 (winner AuxPoW-heavy with *more* blocks, loser direct-heavy with *fewer*
+blocks, and the letter that wins is flipped relative to sec.17's framing).
 
 - X2 (winner-to-be): 227808 **AuxPoW**, 227809 **direct**, 227810 **AuxPoW** (3 blocks: 2 AuxPoW + 1 direct).
 - Y2 (loser-to-be): 227808 **direct**, 227809 **AuxPoW** (2 blocks: 1 direct + 1 AuxPoW).
@@ -853,6 +862,34 @@ AuxPoW-heavy, decoupling any accidental pattern).
 AuxPoW blocks** -- reversing which letter/composition wins from sec.17 changes nothing about the
 underlying rule. Restart-after-reorg repeated for this pair too: both nodes retained the identical
 tip/chainwork after an independent stop+restart.
+
+### 18.1 Literal opposite-composition reorg: DIRECT-heavy winner vs. AuxPoW-heavy loser
+
+Closes the composition-symmetry gap precisely: fresh clones (`reorg3-X`, `reorg3-Y`), disconnected,
+where the **more-work winner is DIRECT-heavy** and the **less-work loser is AuxPoW-heavy** -- the
+literal opposite of every prior reorg test in this document (sec.17's Y and sec.18's X2 were both
+AuxPoW-heavy winners). Does not involve obsolete D.
+
+- X (winner-to-be, direct-heavy): 227808 **direct**, 227809 **direct**, 227810 **AuxPoW** (3 blocks: 2
+  direct + 1 AuxPoW).
+- Y (loser-to-be, AuxPoW-heavy): 227808 **AuxPoW**, 227809 **AuxPoW** (2 blocks: 2 AuxPoW).
+- Before reconnect: X chainwork strictly greater than Y's by 268,435,712 work units (confirmed via
+  real `int(chainwork,16)` comparison).
+- Reconnected Y to X: **Y reorganized onto X's DIRECT-heavy branch.** Final: both at hash
+  `b3597e24baf426f7b660e5333cbf81ab377403c2fecdbb8155fcbe0f1f11a423`, both chainwork
+  `...2e45f80fc0b4495b7b`.
+- Disconnected (Y's own, both AuxPoW): `bcf0a083d29cdcdc...` (227808), `fabed2ceb702f17a...` (227809).
+- Connected (X's): `000000030f3b9f9b...` (227808 direct), `00000000c5411c46...` (227809 direct),
+  `b3597e24baf426f7...` (227810 AuxPoW).
+- `getchaintips` on Y: its own former AuxPoW tip (`fabed2ceb702f17a...`, height 227809) correctly
+  appears as `"status": "valid-fork"`, `branchlen: 2` -- demoted, not vanished.
+- Restart-after-reorg: both nodes retained the identical tip/chainwork after an independent stop+restart.
+
+**This is now the literal opposite composition from sec.17, closing the symmetry gap**: sec.17 proved
+an AuxPoW-heavy branch can win; this proves a direct-heavy branch can win against an AuxPoW-heavy
+competitor; sec.18 proved the winning letter is independent of sec.17's framing. Together, all three
+confirm proof mechanism and branch identity are both irrelevant to fork choice -- only accumulated
+chainwork decides.
 
 ## 19. Branch-local ASERT anchor test (items 9-12)
 
@@ -950,24 +987,235 @@ remains the correct and only predictor of the real reorg outcome in both directi
 | Mixed-proof A/B/C convergence | converges after every block | **converged after all 6/6 blocks** |
 | Same-anchor activation-crossing reorg | more-work branch wins, crosses 227807 cleanly | **PASS** -- Y won, real log-verified disconnect/connect across the boundary |
 | Reverse-composition reorg | more-work branch wins regardless of AuxPoW/direct mix | **PASS** -- X2 (AuxPoW-heavy) won |
+| Literal opposite-composition reorg (sec.18.1) | direct-heavy branch can also win against an AuxPoW-heavy competitor | **PASS** -- X (direct-heavy) won |
 | Direct/AuxPoW fork choice follows chainwork | never block count alone | **PASS** -- verified mathematically, sec.20 |
 | Branch-local ASERT anchor selection | each branch computes its own anchor, no leakage | **PASS** -- differing nBits per branch, no leakage either query order |
-| Restart-after-reorg (both reorg tests) | tip/chainwork persist, losing branch demoted not vanished, no AuxPoW corruption | **PASS** |
+| Restart-after-reorg (all reorg tests) | tip/chainwork persist, losing branch demoted not vanished, no AuxPoW corruption | **PASS** |
 
 No consensus or RPC code was changed at any point in this phase. The one real bug found (sec.15's
-onion-port collision) is rehearsal-lab infrastructure, not BitAIcoin consensus code. Per instruction,
-this phase stops here: **not** proceeding to BIP34 height 227931, full fresh-node HEADERS sync,
-pruning, or stabilization-checkpoint selection until this report is reviewed.
+onion-port collision) is rehearsal-lab infrastructure, not BitAIcoin consensus code. This phase was
+reviewed and approved; per that review, the rehearsal proceeded next to the real BIP34 height 227931
+boundary (sec.23) -- full fresh-node HEADERS sync, pruning, and stabilization-checkpoint selection
+remain deliberately not started.
 
-## 22. Pending sections (will be completed once BIP34/HEADERS/pruning/checkpoint work begins)
+## 23. BIP34 activation rehearsal at the real height 227931 (separate phase, own evidence)
+
+Dedicated section, kept separate from the 227808 sections above per instruction. New disposable chain
+(`bip34-boundary` and its descendants); the canonical node A, both golden 227807/227928 snapshots'
+*sources*, Scenario A/B evidence, and all sec.14-21 convergence/reorg evidence were never reused or
+mutated.
+
+### 23.1 Real BIP34Height parameter (read from source, not docs/comments)
+
+Confirmed directly in `src/kernel/chainparams.cpp` (`CBitAIcoinParams`): `consensus.BIP34Height =
+227931` (paired with `consensus.BIP34Hash` set to the real historical Bitcoin mainnet hash at that
+height, consistent with this chain inheriting real Bitcoin history). Enforcement mechanism traced
+through `src/validation.cpp` (`ContextualCheckBlock`, the `bad-cb-height` check) ->
+`DeploymentActiveAfter(pindexPrev, ..., DEPLOYMENT_HEIGHTINCB)` -> `src/consensus/params.h`
+(`DeploymentHeight(DEPLOYMENT_HEIGHTINCB) == BIP34Height`) -> `src/deploymentstatus.h`:
+```
+inline bool DeploymentActiveAfter(const CBlockIndex* pindexPrev, ...)
+{
+    return (pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1) >= params.DeploymentHeight(dep);
+}
+```
+For a candidate block at height H, this is `H >= 227931`. **Confirmed exactly as expected**: height
+227930 (`H=227930 < 227931`) does NOT enforce `bad-cb-height`; height 227931 (`H=227931 >= 227931`) is
+the first height that DOES. Also confirmed in `src/node/miner.cpp`: `coinbaseTx.vin[0].scriptSig =
+CScript() << nHeight;` is **unconditional** -- the real miner always encodes the correct height
+regardless of whether BIP34 enforcement has activated yet, so every real-mined block in this rehearsal
+(both before and after 227931) naturally has a correct height-encoded coinbase; testing a *wrong*
+height therefore requires manually constructing a candidate (sec.23.5/23.6), never something the real
+miner would ever itself produce.
+
+### 23.2 Building the disposable chain: 227808 through 227928
+
+`bip34-boundary`, cloned from the immutable `golden-227807-pre-activation` snapshot. Verified before
+mining: height 227807, hash `000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f`, zero
+peers.
+
+**Crossing 227808**: one real, valid, upgraded **direct** block: hash
+`00000008954151d793eb2bb92652780b7ed9a081e7c28e4c04650d8daee50422`, version `0x20000000`, bits
+`1d0fb6d7` (obeys ASERT, matching the already-established real anchor value), chainwork
+`...2e45f80fc09449597b`.
+
+**Gap 227809->227928** (121 blocks): mined via the same audited round-barrier, multi-worker direct
+miner design as `durable_miner.py` (unique payout address per worker, hard round barrier, no `kill()`)
+-- real PoW throughout, no difficulty/height-parameter changes, no synthetic block-index edits. Real
+measured rate: ~208-240 blocks/hour (10 workers), completing the full gap in ~2081s (~35 minutes) of
+real wall-clock time. Automated provenance check: all 121 blocks (227808-227928) verified sequential,
+unbroken `previousblockhash` linkage, final tip exactly `getblockhash(227928)` -- **PASS**.
+
+**Real finding, honestly disclosed (not a bug, not fixed, not worked around)**: because this gap was
+mined far faster than its nominal 600s/block schedule, and BitAIcoin's ASERT anchor is permanently
+fixed at height 227807 (heightDiff grows without bound from that one fixed point, never rolling
+forward), the cumulative schedule deviation compounds for as long as blocks keep arriving faster than
+600s/block relative to that fixed anchor. By height 227928 this had already pushed bits from the
+initial `1d0fb6d7` down to `1d063a0f` -- meaningfully harder -- purely as a real, correct consequence of
+mining efficiently, not any parameter change. This is disclosed here because it directly affected how
+long later real-PoW steps in this same phase took (sec.23.5's wrong-height solve alone took several
+minutes of real 8-worker compute at the resulting difficulty), and because it is a genuine, worth-
+recording property of this specific ASERT variant's fixed-anchor design: a network that mines
+substantially faster than schedule for an extended period will see monotonically increasing difficulty
+relative to that fixed anchor for as long as the deviation persists, with no rolling-window reset. This
+is **not** flagged as a discrepancy requiring a Core change -- it is the direct, self-consistent
+consequence of the already-frozen, already-reviewed ASERT design being exercised at a real fast-mining
+rate for the first time in this rehearsal, and no code was touched to produce or work around it.
+
+**Item 6 snapshot**: cleanly stopped, snapshotted (`cp -Rc`) as `golden-227928-pre-bip34/` (three
+blocks before real BIP34Height=227931), documented as disposable rehearsal infrastructure only (never
+run `bitaicoind` directly against it).
+
+### 23.3 Normal boundary sequence: 227929-227932 (items 8, 9, 12, 14)
+
+`boundary-normal`, cloned fresh from `golden-227928-pre-bip34`.
+
+| height | mechanism | hash | version | AuxPoW | bits | chainwork | time | coinbase prefix | decoded height | subsidy |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 227929 | direct | `000000036dd0346752882e3f30b6b1ba7680819726cc489aa60757cfebee902d` | `0x20000000` | unset | `1d061e1f` | `...2e45f80fca62e6d1db` | 1790312006 | `03597a0300` | 227929 | 25 BAIC |
+| 227930 | AuxPoW | `043a0b40f62e3be2ee3cf7cc08a128eae258b167bd65959e3f61889094d5e1d6` | `0x42490100` | **set** | `1d06068f` | `...2e45f80fca8d630bbb` | 1790312052 | `035a7a0300` | 227930 | 25 BAIC |
+| **227931** | **direct** | `000000000dcfc56475a3d3767c8ae0efd361db9239181c4d8988c25e8833e4e3` | `0x20000000` | unset | `1d05eb57` | `...2e45f80fcab8a2a1d9` | 1790314557 | `035b7a0300` | 227931 | 25 BAIC |
+| 227932 | AuxPoW | `5ef0c1080f6d864df67429613fbef5819836d90e60c09fdbacaf07be77c7dd9b` | `0x42490100` | **set** | `1d064af7` | `...2e45f80fcae15105a9` | 1790314569 | `035c7a0300` | 227932 | 25 BAIC |
+
+**227931 is the real first BIP34-enforced height.** Every coinbase's decoded height (BIP34 push, parsed
+independently from `scriptSig`) exactly equals the block's own real height, for both direct and AuxPoW
+blocks, both before and after activation.
+
+### 23.4 Item 9: child vs. parent coinbase, explicit distinction
+
+For the AuxPoW blocks above (227930, 227932), the coinbase decoded and checked in the table is the
+**BitAIcoin CHILD's own real coinbase** (`getblock`'s `tx[0]`) -- the object BIP34's `bad-cb-height`
+check actually inspects (`block.vtx[0]->vin[0].scriptSig`, `src/validation.cpp`). The **AuxPoW PARENT's
+own coinbase** (built by `contrib/merge_mining_coordinator/provider.py`'s
+`SyntheticParentWorkProvider`, carrying the merge-mining commitment tag) is a completely separate
+object on a separate synthetic chain, never inspected by BIP34 validation, and never substitutes for
+the child's own coinbase in any check. AuxPoW does not and cannot bypass BIP34 -- the child coinbase is
+independently, fully validated exactly as a direct block's would be.
+
+### 23.5 Wrong child height AFTER activation (item 10) -- `bad-cb-height`
+
+From `boundary-normal` at real height 227930 (before mining 227931), constructed a real candidate for
+height 227931 with correct prevhash, correct required bits (`0x1d05eb57`, real ASERT value at that
+tip), valid real PoW solved against that target, a structurally valid segwit coinbase and witness
+commitment (byte-exact real format, reused/generalized from sec.19.2's wrong-bits construction) --
+**except** the coinbase's own height push deliberately encodes **227930** instead of the real 227931.
+
+```
+real_height=227931  declared_bits=0x1d05eb57  coinbase_claims=227930
+submitblock result: 'bad-cb-height'
+tip after attempt: height=227930 (UNCHANGED)
+```
+
+**Rejected exactly as expected, for exactly the intended reason** -- the block reached full BIP34
+validation (correct PoW, correct bits, valid witness commitment) and was rejected specifically and
+only for the height mismatch, not for any incidental malformation. Tip provably unchanged.
+
+### 23.6 Pre-activation control (item 11) -- accepted, no enforcement yet
+
+From a **fresh** `boundary-preactivation-control` clone of `golden-227928-pre-bip34` (never reused from
+sec.23.5's node): mined a real, valid 227929, then constructed a candidate for height 227930 -- correct
+prevhash, correct required bits (`0x1d069df7`), valid real PoW, valid witness commitment -- with the
+coinbase deliberately encoding **227929** instead of the real 227930.
+
+```
+real_height=227930  declared_bits=0x1d069df7  coinbase_claims=227929
+submitblock result: None (ACCEPTED)
+tip after attempt: height=227930, hash=0000000585a9ffc5aaee81e2b8378af883fae6653db636613bec1f5f9942cc6d
+```
+
+**Accepted.** On-chain confirmation: the real block at height 227930 has a coinbase-encoded height of
+227929 (not 227930) and is nonetheless the node's real, valid tip. This is the strongest possible
+boundary demonstration: **the identical class of defect (wrong child-height encoding) is accepted one
+block before BIP34Height and rejected with `bad-cb-height` at BIP34Height itself** -- sec.23.5 and
+sec.23.6 together isolate the exact height at which enforcement begins, using the real node's own
+validation, not an assumption from documentation.
+
+### 23.7 AuxPoW wrong-height subtest (item 13) -- not attempted, documented per instruction
+
+Per instruction, this optional subtest was not pursued: `createauxblock`'s candidate cache is keyed to
+the child candidate hash, so mutating the child coinbase changes the child hash and would make
+`submitauxblock` (which expects to match its own cached job) unsuitable without weakening RPC
+semantics, which is explicitly not permitted. What this rehearsal already has is judged sufficient:
+sec.23.3's real, valid AuxPoW block at 227932 proves normal ASERT+AuxPoW+BIP34 integration; sec.23.5's
+direct wrong-height rejection proves the consensus enforcement mechanism itself (BIP34 validates
+`block.vtx[0]` regardless of which mining path produced the block, sec.23.4); the existing C++/functional
+AuxPoW-specific wrong-height test coverage (outside this rehearsal) remains the adversarial AuxPoW
+authority for this specific combination.
+
+### 23.8 DAA/chainwork continuity across the boundary (item 14)
+
+Independently computed expected chainwork as `2**256 // (target+1)` from each block's own real `bits`
+and compared against every real observed delta across 227929-227932:
+
+| height | bits | observed delta | independently computed | match |
+|---|---|---|---|---|
+| 227929 | `1d061e1f` | 702060416 | 702060416 | **yes** |
+| 227930 | `1d06068f` | 712784352 | 712784352 | **yes** |
+| **227931** | `1d05eb57` | 725587486 | 725587486 | **yes** |
+| 227932 | `1d064af7` | 682517456 | 682517456 | **yes** |
+
+Also confirmed live, post-activation: `getblocktemplate.bits` and `createauxblock.bits` on
+`boundary-normal` at its final tip (height 227933's requirement) both returned `1d062cd3` -- **still
+identical**, exactly as pre-activation. **BIP34 activation caused zero change to the DAA/chainwork
+formula** -- every bits fluctuation visible across this range is ASERT's own real dynamic retargeting
+(sec.23.2's fixed-anchor finding), entirely unrelated to and unaffected by BIP34.
+
+### 23.9 Restart across the boundary (item 15)
+
+`boundary-normal` stopped cleanly and restarted: tip unchanged at height 227932/hash
+`5ef0c1080f6d864df67429613fbef5819836d90e60c09fdbacaf07be77c7dd9b`; all four blocks (227929-227932)
+re-read via `getblock` -- every coinbase height still decodes correctly, both AuxPoW blocks (227930,
+227932) still show the correct `VERSION_AUXPOW` bit, no serialization/migration/revalidation issue on
+the first BIP34-enforced block specifically or any other.
+
+### 23.10 Small reorg crossing 227931 (item 16)
+
+Two fresh clones of `golden-227928-pre-bip34` (`boundary-reorgX`, `boundary-reorgY`), disconnected.
+
+- **X** (own real 227929, 227930) -> real, valid **227931 DIRECT** (hash
+  `000000041b933c1377fd5abbc9641638d45b27b94feb79244caf11d6b65a4054`, bits `1d06924f`) -> one
+  descendant (227932).
+- **Y** (own real 227929, 227930) -> real, valid **227931 AuxPoW** (hash
+  `9d0043cd1c166d6d654760ca973f03ba7694b88e8c42f237a87efacf72b07788`, bits `1d06a89f`) -> two
+  descendants (227932, 227933), giving Y strictly greater chainwork.
+
+Both competing 227931 blocks independently satisfied BIP34 (correct, self-consistent height encoding
+on their own respective branches) **before** any reconnect. Real P2P reconnect: **X reorganized onto
+Y**, crossing the real 227931 activation boundary with no restart. Final: both nodes at hash
+`0000000245e9c756be70283f7f57016edf459a37633728a05cd2c4c4a29695af`, chainwork
+`...2e45f80fcafd8c576e`. Restart-after-reorg: both nodes retained the identical tip/chainwork after an
+independent stop+restart.
+
+### 23.11 BIP34 phase summary
+
+| condition | expected | observed |
+|---|---|---|
+| BIP34Height read from real source | 227931, enforcement gated by `H >= BIP34Height` | **confirmed exactly**, sec.23.1 |
+| Continuous valid ancestry 227808->227928 | no gaps, no synthetic edits | **PASS**, 121/121 blocks |
+| Normal boundary sequence (direct + AuxPoW around 227931) | both mechanisms accepted, correct height encoding | **PASS**, sec.23.3 |
+| Child vs. parent coinbase distinction | AuxPoW never bypasses child BIP34 | **confirmed**, sec.23.4 |
+| Wrong height AFTER activation | rejected `bad-cb-height`, tip unchanged | **PASS**, sec.23.5 |
+| Wrong height BEFORE activation (control) | accepted, no enforcement | **PASS**, sec.23.6 |
+| Valid AuxPoW immediately after activation | accepted, correct height | **PASS**, sec.23.3 (227932) |
+| BIP34 does not affect DAA/chainwork | identical formula before/after | **PASS**, sec.23.8 |
+| Restart across the boundary | tip/chainwork/coinbase decoding all persist | **PASS**, sec.23.9 |
+| Reorg crossing 227931 | normal reorg, both sides independently BIP34-valid | **PASS**, sec.23.10 |
+
+No Core or consensus change was necessary or made anywhere in this phase. Per instruction, the
+rehearsal stops here: **not** proceeding to full fresh-node HEADERS-first sync, a reindex/reindex-
+chainstate matrix beyond what this phase needed, pruning, or stabilization-checkpoint selection until
+this report is reviewed.
+
+## 24. Pending sections (will be completed once HEADERS/pruning/checkpoint work begins)
 
 All tooling below is written and ready in `~/Downloads/bitaicoin-rehearsal-lab/` -- each script is a
 real, runnable implementation (not a placeholder), verified to import/parse correctly. Everything
-through sec.6-21 (the canonical 225823->227807 run, the 227807 snapshot, Scenario A/B at the real
-activation boundary, and the full upgraded-node convergence/reorg/branch-local-ASERT phase) is now
-real, complete, and PASS. **BIP34 height 227931, full fresh-node HEADERS sync, pruning, and
-stabilization-checkpoint selection remain deliberately not started**, pending review of this report.
-No result for any of the following exists yet; none will be fabricated or assumed:
+through sec.6-23 (the canonical 225823->227807 run, the 227807 snapshot, Scenario A/B at the real
+activation boundary, the full upgraded-node convergence/reorg/branch-local-ASERT phase, and now the
+real BIP34 height 227931 boundary rehearsal) is real, complete, and PASS. **Full fresh-node HEADERS
+sync, pruning, and stabilization-checkpoint selection remain deliberately not started**, pending
+review of this report. No result for any of the following exists yet; none will be fabricated or
+assumed:
 
 | item | script | status |
 |---|---|---|
@@ -988,15 +1236,15 @@ No result for any of the following exists yet; none will be fabricated or assume
 | Reverse proof-mechanism-dominance reorg | sec.18 (`run_reorg_reverse.py`) | **DONE -- PASS** |
 | Branch-local ASERT anchor test (incl. anchor-leakage check + wrong-bits subtest) | sec.19-19.2 (`run_branch_local_asert.py`, `wrong_bits_subtest.py`) | **DONE -- PASS**, including the optional wrong-bits `bad-diffbits` confirmation |
 | Chainwork mathematical verification | sec.20 | **DONE -- PASS**, matches to 6+ significant figures |
-| ASERT dynamic verification (real heights, independent reference) | `scenario_asert_compare.py` | superseded by sec.9's and sec.19's live confirmations; the original script remains available for a future standalone run if wanted |
-| BIP34 boundary (227931) crossing | `scenario_bip34.py` | ready, PENDING run |
-| Restart/reindex matrix | `scenario_restart_matrix.py` | ready, PENDING run at each required height |
-| HEADERS-first synchronization (fresh-node milestone) | `scenario_headers_sync.py` | ready, PENDING run -- explicitly deferred (item 14 of this phase's instructions): sec.17's reorg already exercised real AuxPoW header propagation during a competing-branch event, but not yet the dedicated fresh-node HEADERS-first milestone |
+| ASERT dynamic verification (real heights, independent reference) | `scenario_asert_compare.py` | superseded by sec.9's, sec.19's, and sec.23.8's live confirmations; the original script remains available for a future standalone run if wanted |
+| BIP34 boundary (227931) crossing | sec.23 (`run_bip34_normal.py`, `run_bip34_control.py`, `run_bip34_reorg.py`, `manual_block.py`, `mine_gap.py`) | **DONE -- PASS**, including the wrong-height/control pair and a boundary-crossing reorg |
+| Restart/reindex matrix | `scenario_restart_matrix.py` | partially covered by sec.23.9's boundary restart and sec.16.1/17.1/18/23.10's reorg restarts; a dedicated full-matrix run at every required height remains ready, PENDING |
+| HEADERS-first synchronization (fresh-node milestone) | `scenario_headers_sync.py` | ready, PENDING run -- explicitly deferred: sec.17/23.10's reorgs already exercised real AuxPoW/BIP34 header propagation during competing-branch events, but not yet the dedicated fresh-node HEADERS-first milestone |
 | Pruning rehearsal | `scenario_pruning_plan.py` | ready; includes an honest feasibility check against the real 550 MiB prune floor, with `feature_auxpow_prune.py` as the documented fallback authority if infeasible at these heights |
-| Obsolete-node (D) further divergence | `scenario_obsolete_node_D.py` | D's behavior at the pre-activation boundary (sec.7.1) and against both proof mechanisms at the activation boundary (sec.9.1/10.1) is now recorded; per instruction (item 16 of this phase), D was deliberately not involved further in the upgraded-node convergence/reorg experiments -- that evidence was judged sufficient for now |
+| Obsolete-node (D) further divergence | `scenario_obsolete_node_D.py` | D's behavior at the pre-activation boundary (sec.7.1) and against both proof mechanisms at the activation boundary (sec.9.1/10.1) is now recorded; per instruction, D was deliberately not involved further in either the convergence/reorg phase or the BIP34 phase -- that evidence was judged sufficient for now |
 | Upgrade gate statement | (sec.15 of the original spec) | PENDING |
 | Post-activation stabilization checkpoint candidate | (sec.16 of the original spec) | PENDING |
-| Discrepancies found, if any | | none found in consensus code; mining-harness/rehearsal-lab bugs found and fixed are documented in sec.5 and sec.15 (onion-port collision); the legacy-vs-ASERT divergence at 227808 (sec.6.2) and both obsolete-node rejections (sec.9.1/10.1) are expected designed behavior, not discrepancies |
+| Discrepancies found, if any | | none found in consensus code; mining-harness/rehearsal-lab bugs found and fixed are documented in sec.5, sec.15 (onion-port collision), and sec.23.2's honest disclosure of a real-but-expected ASERT fixed-anchor difficulty-growth dynamic (not a bug, not fixed, not worked around); the legacy-vs-ASERT divergence at 227808 (sec.6.2) and both obsolete-node rejections (sec.9.1/10.1) are expected designed behavior, not discrepancies |
 
 Note on sec.9/10: the existing `scenario_A_direct.py`/`scenario_B_auxpow.py` scripts (written earlier
 in the rehearsal, sec.7 of the pending table before this revision) mine extra continuity blocks
