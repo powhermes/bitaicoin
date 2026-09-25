@@ -27,3 +27,11 @@ target/
 /guix-build-*
 
 /ci/scratch/
+
+# Functional-test-framework artifacts generated directly under test/ by
+# test/functional/test_runner.py and the CMake configure step (not under
+# /*build*, so not covered by the pattern above). Restores patterns that
+# were present in this file historically before being dropped.
+test/config.ini
+test/cache/*
+test/.mypy_cache/
