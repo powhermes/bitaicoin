@@ -323,10 +323,10 @@ against real data for the first time): for the first ASERT block (227808), the a
 Real computed result: `calculate_asert(ref_target=<227807's target>, pow_target_spacing=600,
 time_diff=37, height_diff=0, pow_limit=<BitAIcoin's real powLimit>, half_life=21600)` =
 target `423654490308240600993901971007076456240812435801593378127646136729600`, which encodes back to
-**nBits `0x1d0fb6d7`** (ratio to the anchor's own target: 0.9821395874 -- ASERT tightens the target
-very slightly here because 37 real seconds elapsed for 0 height-delta, i.e. real block 227807 arrived
-slightly "ahead of schedule" relative to the anchor's own reference point, which is expected and
-correct ASERT behavior, not a bug).
+**nBits `0x1d0fb6d7`** (ratio to the anchor's own target: 0.98213957 -- ASERT *tightens* the target
+here: 37 real seconds elapsed for 0 height-delta, i.e. real block 227807 arrived far ahead of the
+per-block schedule implied by the anchor's own reference point, so ASERT correctly hardens difficulty
+in response, which is expected and correct ASERT behavior, not a bug).
 
 **Legacy 2016-block retarget, computed independently for comparison (never actually applied --
 `GetNextWorkRequired()`'s ASERT branch runs first and is unconditionally taken once
@@ -339,21 +339,44 @@ height 227807 with zero blocks mined into it throughout, verified before and aft
 real block 227807's own time (1790268674): `nActualTimespan` = `1790268674 - 1789789080` = `479594`
 seconds -- within `[nPowTargetTimespan/4, nPowTargetTimespan*4]` = `[302400, 4838400]`, so **no
 clamping applies**. `bnNew = <227807's target> * 479594 / 1209600`, clamped to `powLimit` (no clamp
-needed) -> **nBits `0x1d065805`** (a *much* easier target than either the anchor's own `1d0fffff` or
-ASERT's `1d0fb6d7` -- expected, since 1984 real blocks were mined across this rehearsal's 2016-block
-window in far less than the nominal 2016*600s=1,209,600s the legacy DAA was designed to expect, so the
-legacy DAA would have judged the network "too fast" and eased off hard, exactly the kind of large,
-lurchy step ASERT is designed to avoid).
+needed) -> **nBits `0x1d065805`**.
 
-**Recorded per instruction, without changing anything**: the two branches genuinely disagree
-(`0x1d065805` legacy vs. `0x1d0fb6d7` ASERT -- legacy is dramatically looser). This is exactly the
-designed behavior, not a discrepancy to fix: `GetNextWorkRequired()` gates on
+**Corrected interpretation** (an earlier draft of this section had this backwards -- corrected here,
+values unchanged): all three nBits share the same compact exponent byte (`0x1d`), so target is
+directly proportional to the mantissa, and `0x065805 < 0x0fb6d7 < 0x0fffff` means
+**`target(legacy) < target(ASERT) < target(anchor)`** -- the legacy value is a *smaller* target, i.e.
+**substantially higher difficulty**, not looser. Quantitatively (verified by
+`~/Downloads/bitaicoin-rehearsal-lab/verify_227808_targets.py`, sec.6.2a):
+- ASERT target / anchor target ≈ **0.98213957** → ASERT difficulty ≈ **1.018185x** anchor difficulty
+- legacy target / anchor target ≈ **0.39648952** → legacy difficulty ≈ **2.522135x** anchor difficulty
+
+The real 225792→227807 legacy retarget window (1,984 real blocks) completed in 479,594 real seconds,
+far faster than its nominal 1,209,600-second (2016*600s) schedule. A legacy DAA reacting to that
+entire window would therefore have judged the network "much too fast" and **hardened difficulty
+sharply (~2.52x)** at 227808 -- the correct legacy-DAA response to blocks arriving faster than
+scheduled is to raise difficulty, not lower it. ASERT also hardens at 227808, because the real
+227806→227807 interval it actually sees is only 37 seconds (also faster than the 600s/block
+schedule), but only **modestly (~1.02x)**, because ASERT's first-block computation is anchored purely
+to that one local interval rather than carrying the entire legacy window's cumulative timing history.
+The point of the comparison is **large difficulty increase (legacy) vs. small difficulty increase
+(ASERT)** -- never "legacy easing off."
+
+### 6.2a Regression assertion (rehearsal/documentation verification only, `pow.cpp` untouched)
+
+`~/Downloads/bitaicoin-rehearsal-lab/verify_227808_targets.py` pins the corrected ordering as a real,
+runnable assertion so this specific inversion cannot silently recur: asserts
+`target(0x1d065805) < target(0x1d0fb6d7) < target(0x1d0fffff)` and therefore
+`difficulty_legacy > difficulty_ASERT > difficulty_anchor`. Run and **PASSED**. This is documentation
+tooling only -- it does not touch `src/pow.cpp` or any consensus code, and changes no computed nBits.
+
+**Recorded per instruction, without changing either calculated nBits**: the two branches genuinely
+disagree (`0x1d065805` legacy vs. `0x1d0fb6d7` ASERT -- legacy is dramatically *harder*, not looser).
+This is exactly the designed behavior, not a discrepancy to fix: `GetNextWorkRequired()` gates on
 `BitAIASERTActivationHeight` *before* the legacy `% DifficultyAdjustmentInterval()` check, so real
 227808 will unconditionally receive the ASERT value `0x1d0fb6d7`, never the legacy value, regardless
-of 227808's coincidental alignment with a legacy retarget boundary. Scenario A (sec.12) will mine a
-real 227808 block and independently confirm the real node's own `GetNextWorkRequired()` output
-matches this computed `0x1d0fb6d7` exactly, via real RPC, not by trusting this offline computation
-alone.
+of 227808's coincidental alignment with a legacy retarget boundary. Scenario A (sec.8) mines a real
+227808 block and independently confirms the real node's own `GetNextWorkRequired()` output matches
+this computed `0x1d0fb6d7` exactly, via real RPC, not by trusting this offline computation alone.
 
 ### 6.3 Automated full provenance verification (all 1,984 canonical blocks)
 
