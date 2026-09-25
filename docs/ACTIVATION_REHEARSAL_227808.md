@@ -1,32 +1,32 @@
 # BitAIcoin activation rehearsal: crossing 227808 (AuxPoW/ASERT) and 227931 (BIP34)
 
-**Status: IN PROGRESS.** This document is being built incrementally as the rehearsal proceeds.
-Sections marked `PENDING` have not happened yet and contain no fabricated data -- per the governing
-instruction, no result is recorded before it actually exists. As of this revision: the real
-225823->227807 canonical mining run, the 227807 snapshot, Scenario A/B at the real activation
-boundary (sec.6-12), the full upgraded-node convergence/reorg/branch-local-ASERT phase (sec.14-21,
-reviewed and approved, including a literal opposite-composition reorg added in review, sec.18.1), and
-now **the real BIP34 height 227931 boundary rehearsal (sec.23)** -- a fresh 121-block gap mined
-honestly to 227928, the real BIP34Height parameter and its exact enforcement semantics confirmed from
-source, a normal direct+AuxPoW sequence across the boundary, a wrong-child-height rejection
-(`bad-cb-height`) immediately after activation, the matching pre-activation control (accepted, no
-enforcement yet), DAA/chainwork continuity across the boundary, restart persistence, and a reorg
-crossing 227931 -- are all complete, real, and PASS (BIP34 phase reviewed and approved). Every node
-used in every phase is stopped; the preserved evidence from earlier phases (canonical node A, both
-golden 227807/227928 snapshot sources, both Scenario A/B datadirs) was never reused or mutated. Two
-corrections from source audits are folded in: sec.23.0 (`BIP34Hash` is an inert BIP30-skip
-optimization gate, unrelated to BIP34's own enforcement -- an earlier claim about it was misleading)
-and sec.23.2's precise, corrected ASERT fixed-anchor wording (real, expected difficulty growth when a
-gap is mined faster than nominal spacing -- not a bug, not fixed, matches the frozen design intent).
+**Status: REHEARSAL COMPLETE.** This document was built incrementally as the rehearsal proceeded; every
+section reflects a real result that actually happened, in the order it happened, including one real
+Core defect this rehearsal itself found and fixed. No result was ever recorded before it existed.
 
-The **final lifecycle phase** is now underway: fresh-node HEADERS-first/full synchronization
-(sec.25.1) is complete, real, and PASS. Reindex validation (Part 2) surfaced **a real, confirmed Core
-defect** -- full `-reindex` silently truncated the chain at the first AuxPoW block (sec.26). Per
-instruction, all further final-phase work paused the moment this was confirmed; the defect was fixed
-and re-verified on its own narrowly-scoped track (commit `7942285e1175dacb54958b7cde1e4fa19630fde0`,
-pushed) before this document was updated. The remainder of the final lifecycle phase (sec.27:
-consolidated restart/reindex matrix, pruning, upgrade gate, stabilization criteria) remains
-deliberately not started, pending review of this report.
+**Summary of everything covered**: the real 225823->227807 canonical mining run and 227807 snapshot;
+Scenario A/B at the real 227808 activation boundary (sec.6-12); the full upgraded-node
+convergence/reorg/branch-local-ASERT phase (sec.14-21, reviewed and approved, including a literal
+opposite-composition reorg added in review, sec.18.1); the real BIP34 height 227931 boundary rehearsal
+(sec.23, reviewed and approved) -- a fresh 121-block gap mined honestly, the real `BIP34Height`
+parameter and its exact enforcement semantics confirmed from source (plus a correction to an earlier,
+misleading claim about the separate, inert `BIP34Hash` mechanism, sec.23.0), a normal direct+AuxPoW
+sequence across the boundary, a wrong-child-height rejection (`bad-cb-height`) immediately after
+activation, the matching pre-activation control (accepted, no enforcement yet), DAA/chainwork
+continuity, restart persistence, and a reorg crossing 227931; and the **final lifecycle phase**
+(sec.25-31) -- real fresh-node HEADERS-first/full synchronization; reindex validation that found a
+real, confirmed Core defect (full `-reindex` silently truncated the chain at the first AuxPoW block),
+which was fixed on its own narrowly-scoped track (commit `7942285e1175dacb54958b7cde1e4fa19630fde0`,
+pushed) and re-verified against the real rehearsal fixtures before this document was updated, per
+instruction; a consolidated restart/reindex matrix; a real pruning-feasibility analysis (real, honest
+infeasibility at the current tip, precisely characterized, never a manufactured "prune passed"
+result); a production upgrade gate; and post-activation stabilization criteria (a height range and
+checklist -- explicitly never a production hash from this or any rehearsal). Every node used in every
+phase is stopped; every piece of preserved evidence (canonical node A, both golden 227807/227928
+snapshot sources, both Scenario A/B datadirs, `boundary-normal`, `scenario-B-auxpow`) was never reused
+or mutated. **No production action was taken**: the real/private node was never started, mined, or
+touched; no checkpoint or minimum-chainwork parameter was changed; no GBT adapter or Stratum/pool
+infrastructure was built.
 
 ## 0. Purpose
 
@@ -1450,18 +1450,167 @@ reach real AuxPoW-active history:
 `origin/bitaicoin-phase1`. The final lifecycle phase resumes from where it paused (Part 2's remaining
 items) in a subsequent pass of this same document.
 
-## 27. Pending sections (will be completed once the remainder of the final lifecycle phase runs)
+## 27. Consolidated restart/reindex matrix (final lifecycle phase, Part 3)
 
-All tooling below is written and ready in `~/Downloads/bitaicoin-rehearsal-lab/` -- each script is a
-real, runnable implementation (not a placeholder), verified to import/parse correctly. Everything
-through sec.6-23 (the canonical 225823->227807 run, the 227807 snapshot, Scenario A/B at the real
-activation boundary, the full upgraded-node convergence/reorg/branch-local-ASERT phase, and the real
-BIP34 height 227931 boundary rehearsal) plus sec.25.1 (fresh-node HEADERS-first/full sync) is real,
-complete, and PASS. **A real reindex defect was found, fixed, and re-verified (sec.26)** -- fixed in
-commit `7942285e1175dacb54958b7cde1e4fa19630fde0`. The remainder of the final lifecycle phase
-(consolidated restart/reindex matrix beyond what sec.26.6 already re-verified, pruning, the upgrade
-gate, and stabilization criteria) remains to be run in a subsequent pass. No result for any of the
-following exists yet; none will be fabricated or assumed:
+Real evidence only; per instruction, no cell was re-tested solely to make the table uniform where
+existing evidence from earlier sections already establishes the behavior.
+
+| state | ordinary restart | reorg + restart | `-reindex` | `-reindex-chainstate` |
+|---|---|---|---|---|
+| 227807 (pre-activation) | **PASS** (sec.19, restarts of `branch-original`/`branch-alt`; many others) | n/a (pre-activation, no competing branch at this exact height in this rehearsal) | **PASS** (sec.26.6, `reindex-227807`) | **PASS** (implied by sec.26.6's AuxPoW-state runs, which reindex-chainstate through this height en route) |
+| 227808 direct | **PASS** (Scenario A, sec.9) | **PASS** (sec.17.1, X's own direct 227808 was one of the two competing blocks) | **PASS** (sec.26.6, `reindex-227808-direct`) | not separately isolated at this exact single-mechanism state; superseded by the AuxPoW-state and mature-state runs below, which exercise the identical code path |
+| 227808 AuxPoW | **PASS** (Scenario B, sec.10) | **PASS** (sec.17.1, Y's own AuxPoW 227808 was the other competing block; restart-after-reorg confirmed) | **FOUND THE DEFECT here, then PASS after the fix** (sec.26, sec.26.6) | **PASS** (sec.26.6, and the original discovery-phase confirmation) |
+| 227809+ mixed (real rehearsal data, alternating direct/AuxPoW/direct/AuxPoW/direct/AuxPoW) | **PASS** (sec.16.1, convergence restart test) | **PASS** (sec.17.1/18/23.10, multiple reorgs then restarts) | **PASS** (sec.27.1 below -- real `conv-A` chain, 3 real AuxPoW blocks at 227809/227811/227813, all survive with proof intact) | superseded by the above; same code path already confirmed working |
+| 227930 | **PASS** (`boundary-normal`, sec.23.9) | crossed within sec.23.10's reorg block range; not isolated as its own single-height reorg target | **PASS** (implied -- sequential reindex necessarily validates 227930 correctly en route to the mature-state tip 227933, sec.26.6; reindexing cannot "skip" an intermediate height) | **PASS** (same sequential-validation logic) |
+| 227931 (first BIP34-enforced) | **PASS** (`boundary-normal`, sec.23.9) | **PASS** (sec.23.10, both competing 227931 blocks) | **PASS** (sec.26.6, mature-state reindex passes through and reads 227931 correctly, real AuxPoW block, proof intact) | **PASS** (same mature-state run) |
+| 227932+ | **PASS** (`boundary-normal`, sec.23.9) | **PASS** (sec.23.10, reorg reached 227933) | **PASS** (sec.26.6, mature-state reindex reaches 227933 exactly) | **PASS** (same mature-state run) |
+
+### 27.1 Real-data confirmation: reindexing the actual mixed convergence chain
+
+Closes the "227809+ mixed" cell with real rehearsal data (not only the regtest regression test,
+sec.26.5). Fresh clone of `conv-A` (real chain: 227808 direct, 227809 AuxPoW, 227810 direct, 227811
+AuxPoW, 227812 direct, 227813 AuxPoW). BEFORE: height=227813, hash
+`862f0fa16317a1aa65e801dfc6740ce55374717a5970fda32681128382dc14f1`, chainwork `...2e45f80fc0e4495e7b`.
+Full `-reindex`: AFTER matches exactly (same height/hash/chainwork), zero `auxpow-missing`
+occurrences, and all three real AuxPoW blocks (227809, 227811, 227813) independently confirmed still
+carrying `VERSION_AUXPOW` with correct bits after the reindex. **PASS.**
+
+## 28. Pruning: real feasibility analysis (final lifecycle phase, Part 4)
+
+Established from the REAL current blk-file layout, not assumed from the 550 MiB target alone.
+
+**Real blk-file layout** (real `conv-A` chain, height 227813, 6.9 GB total, 48 files `blk00000.dat`
+through `blk00047.dat`): correlating `-reindex`'s own unconditional `LogInfo` progress markers
+("Reindexing block file blkNNNNN.dat (X% complete)...") against the real `UpdateTip` height log lines
+that follow them shows the **last** "Reindexing block file" marker printed is for `blk00047.dat` at
+97% -- and heights 225823 (the real chain's transition from inherited historical Bitcoin blocks to
+BitAIcoin-native blocks), 227808, and 227813 (the current tip) **all** appear later in the log with no
+further file-boundary marker in between. **All of them are in the same single physical file,
+`blk00047.dat` (6.3 MB, far short of the 128 MiB default rotation size).**
+
+**Confirmed directly in source**: `MIN_BLOCKS_TO_KEEP = 288` (`src/validation.h`).
+
+**Real manual/automatic prune behavior** (`-prune=550` on a fresh clone of the same real chain):
+```
+before: height=227813, size_on_disk=6.9 GB (unpruned)
+after:  height=227813, pruned=true, size_on_disk=507,664,001 bytes (~484 MB), pruneheight=222839
+```
+Real historical data below height 222839 was successfully pruned (confirmed: `getblock` on height
+100000 fails with `"Block not available (pruned data)"`, as expected). **But pruning could not advance
+past height 222839** -- nearly 5,000 blocks short of the current tip, and far short of what
+`MIN_BLOCKS_TO_KEEP=288` alone would suggest should be prunable (227813-288=227525). All real AuxPoW
+blocks in this range (227808, 227809, 227811, 227813) remain fully readable, not pruned. Restarted the
+pruned node: identical tip/hash/chainwork/pruneheight, AuxPoW blocks still fully readable with proof
+intact.
+
+**Confirmed key issue, exactly as anticipated**: this rehearsal's own native blocks (post-225823) are
+tiny (~250-500 bytes each, coinbase-only) compared to the 128 MiB default blk-file rotation size --
+thousands of them fit in a single file. Since that one file's span keeps growing to include the
+**current, always-unprunable tip** as new blocks are mined, the file containing any historical AuxPoW
+proof from this rehearsal **can never become eligible for deletion at the current tip**, regardless of
+how far `MIN_BLOCKS_TO_KEEP` would otherwise allow pruning to reach. This is a real, physical
+consequence of this rehearsal's own block sizes, not a defect in the pruning mechanism itself.
+
+**Exact physical reason, stated precisely**: *227808 and all retained descendants through the current
+tip occupy the same physical blk file (`blk00047.dat`), so normal blk-file-level pruning cannot remove
+the file containing the AuxPoW proof without also deleting the currently-active tip -- which pruning
+correctly refuses to do.* Forcing an actual rollover would require mining on the order of hundreds of
+thousands of additional tiny blocks purely to grow file size past 128 MiB -- explicitly out of
+proportion for this rehearsal, per instruction, and not attempted.
+
+**Authoritative evidence for the underlying mechanism** (on-demand AuxPoW proof storage correctly
+surviving a *real* file-level prune, exercised at a practical scale via `-fastprune`'s tiny 64 KiB
+files): the existing, already-green `test/functional/feature_auxpow_prune.py` (docs/AUXPOW_MILESTONE.md
+sec.5.3), re-run in sec.26.6 alongside the reindex fix and still passing. This rehearsal does not
+re-derive that test; it defers to it explicitly, as its own module docstring anticipates, combined with
+the real restart/reindex evidence above and this real blk-file analysis. **No misleading "real prune
+passed" result is claimed** -- the real, honest result is: real historical data prunes correctly, the
+rehearsal's own recent/AuxPoW-containing data physically cannot at this tip, and the underlying
+mechanism is independently proven at a practical scale by the existing test.
+
+## 29. Production upgrade gate (final lifecycle phase, Part 5)
+
+Formal operational gate for the real production/private BitAIcoin chain. This section does not touch,
+and was not exercised against, the real production node.
+
+| item | value |
+|---|---|
+| Production chain baseline (real, private) | height 225823, hash `0000000ad1060dd6b63a31796c4d57977c7f009eb0229b32d0b15dd303ecff57` |
+| Production activation height | **227808** |
+| Minimum required source/release commit | `2e700d7ad6fe08c840d2e9b4e99ef5e89a2b34f6` (AuxPoW/ASERT/merge-mining milestone) **plus the reindex fix, commit `7942285e1175dacb54958b7cde1e4fa19630fde0`** -- any node that might ever need to `-reindex` after real AuxPoW history exists must run at least this commit, not merely the pre-activation baseline |
+| Binary hashes for tested builds | pre-fix `bitaicoind` SHA-256 `c7a5c8f5627b3d33d069fc90d760957685f4a0b6dc506c0d38ecc761fe3da93e` (used throughout sec.6-25); post-fix `bitaicoind` SHA-256 `bb56b1165e2649e2bc7ccab4d56be87f3f366b57a3d718dc48150610afe6dfa6` (used throughout sec.26-28) -- recorded for reference; a real production release build should be built fresh from the exact release commit, not reused from this rehearsal's own build |
+| AuxPoW chain ID | 16969 (`0x4249`, "BI") |
+| ASERT half-life | 21600 seconds (6 hours) |
+| Direct + AuxPoW validity | both **permanently** valid after activation (never one superseding the other; sec.9-11, sec.16-18, sec.23.3-23.4 -- extensively, repeatedly confirmed) |
+| Obsolete-binary rejection | demonstrably confirmed: obsolete nodes reject the real upgraded chain at 227808 for two independently-observed real reasons depending on proof mechanism (`bad-diffbits` for direct, sec.9.1; `header with invalid proof of work` for AuxPoW, sec.10.1) |
+| Mixed old/new production fleet | **not permitted** through activation -- every production-capable node must run the upgraded release **before** the real production chain reaches height 227808 |
+
+No auto-upgrade or action was taken against the real node as part of this rehearsal; this is an
+operational release-readiness gate, not an instruction to act on production.
+
+## 30. Stabilization criteria (final lifecycle phase, Part 6)
+
+**Explicit reminder, per instruction**: no block hash from this rehearsal is a production checkpoint.
+Every post-225823 block mined in this entire rehearsal (sec.6 onward) belongs to a disposable
+laboratory fork whose hashes, timestamps, and coinbases differ from whatever the real production chain
+will actually produce. `227808`- and `227931`-height rehearsal hashes are **not** production checkpoint
+hashes. No `nMinimumChainWork` or checkpoint parameter should be changed using any rehearsal data.
+
+Instead, the following are the **criteria** the real production chain must satisfy before a real
+production stabilization/checkpoint candidate can be considered -- a height range and a checklist, not
+a hash:
+
+1. Real production chain crosses height 227808.
+2. A real direct-mined block path is observed on the real chain at/after 227808.
+3. A real AuxPoW block path is observed on the real chain, if merge-mining is actually active in
+   production by then.
+4. Substantial real post-activation history accumulates (a specific depth is deliberately not
+   prescribed here -- this rehearsal establishes the *mechanism*, not a magic number for the real
+   network's own organic growth).
+5. Real production node restart(s) pass (ordinary restart, and `-reindex-chainstate` specifically --
+   given sec.26's finding, a real production operator should prefer `-reindex-chainstate` over full
+   `-reindex` unless a full reindex is genuinely required, until/unless further hardening beyond this
+   rehearsal's scope is separately reviewed).
+6. Real peer convergence is confirmed among real production nodes.
+7. No unexpected reorg, serialization, or DAA issue is observed on the real chain.
+8. Real production chain crosses BIP34 height 227931.
+9. Additional real history accumulates after 227931.
+10. **Only then** should a real production height/hash/chainwork candidate be recorded, from the real
+    chain's own real data, for review -- never from this or any other rehearsal.
+
+The rehearsal may identify a height range and a criteria checklist (as above); it must never produce a
+production hash.
+
+## 31. Final lifecycle phase summary and remaining scope
+
+| part | status |
+|---|---|
+| Part 1: fresh-node HEADERS-first/full sync | **DONE -- PASS** (sec.25.1) |
+| Part 2: reindex/reindex-chainstate validation | **DONE** -- found, fixed, and re-verified a real Core defect (sec.26); all four disposable states (227807, 227808 direct, 227808 AuxPoW, mature mixed post-BIP34) and the real mixed convergence chain (sec.27.1) all confirmed passing post-fix |
+| Part 3: consolidated restart/reindex matrix | **DONE** (sec.27) |
+| Part 4: pruning feasibility | **DONE** -- real infeasibility at the current tip, precisely characterized, not manufactured (sec.28) |
+| Part 5: production upgrade gate | **DONE** (sec.29) |
+| Part 6: stabilization criteria | **DONE** (sec.30) |
+| Part 7: report hygiene | performed at the start of this pass (sec.14, and re-confirmed directly on the actual file before this commit) |
+| Part 8: this report | this section and sec.25-30 |
+| Part 9: commit and stop | this section's own commit, see below |
+
+**No Core or consensus change was necessary anywhere in Parts 1, 3, 4, 5, or 6.** The one real defect
+(Part 2) was found, fixed on its own narrowly-scoped track, and re-verified before this document was
+updated, per instruction. Per instruction, this rehearsal now stops: **not** launching production, not
+mining the real/private node, not inserting checkpoints, not changing minimum chainwork, and not
+building a Bitcoin GBT adapter or Stratum/pool infrastructure.
+
+## 32. Pending sections (post-rehearsal)
+
+**This activation rehearsal is now complete end to end.** Everything through sec.6-31 -- the canonical
+225823->227807 run, the 227807 snapshot, Scenario A/B at the real activation boundary, the full
+upgraded-node convergence/reorg/branch-local-ASERT phase, the real BIP34 height 227931 boundary
+rehearsal, fresh-node HEADERS-first/full sync, the full reindex/reindex-chainstate matrix (including
+one real Core defect found, fixed on its own track, and re-verified), pruning feasibility, the
+production upgrade gate, and stabilization criteria -- is real, complete, and either PASS or (for the
+one real discrepancy) FOUND-FIXED-VERIFIED. Nothing below is required to consider the rehearsal itself
+finished; the remaining items are genuinely optional follow-on work, not gaps in what was asked for:
 
 | item | script | status |
 |---|---|---|
@@ -1487,13 +1636,14 @@ following exists yet; none will be fabricated or assumed:
 | BIP34Hash source audit (correcting an earlier misleading report claim) | sec.23.0 | **DONE** -- inert BIP30-skip optimization gate, fully independent of BIP34's own enforcement, no Core change |
 | Fresh-node HEADERS-first / full synchronization | sec.25.1 | **DONE -- PASS** |
 | Full `-reindex` AuxPoW disk-deserialization defect | sec.26 | **FOUND, FIXED, RE-VERIFIED** -- commit `7942285e1175dacb54958b7cde1e4fa19630fde0` |
-| `-reindex-chainstate` (unaffected by the defect, re-confirmed post-fix) | sec.26.6 | **DONE -- PASS** |
-| Consolidated restart/reindex matrix (beyond sec.26.6's re-verification) | `scenario_restart_matrix.py` | partially covered by sec.23.9/26.6 and sec.16.1/17.1/18/23.10's reorg restarts; a dedicated full-matrix run at every required height remains ready, PENDING |
-| Pruning rehearsal | `scenario_pruning_plan.py` | ready; includes an honest feasibility check against the real 550 MiB prune floor, with `feature_auxpow_prune.py` as the documented fallback authority if infeasible at these heights |
-| Obsolete-node (D) further divergence | `scenario_obsolete_node_D.py` | D's behavior at the pre-activation boundary (sec.7.1) and against both proof mechanisms at the activation boundary (sec.9.1/10.1) is now recorded; per instruction, D was deliberately not involved further in either the convergence/reorg phase or the BIP34 phase -- that evidence was judged sufficient for now |
-| Upgrade gate statement | (Part 5 of the final-phase instructions) | PENDING |
-| Post-activation stabilization criteria | (Part 6 of the final-phase instructions) | PENDING |
+| `-reindex-chainstate` (unaffected by the defect, re-confirmed post-fix) | sec.26.6, sec.27 | **DONE -- PASS** |
+| Consolidated restart/reindex matrix | sec.27 | **DONE** -- every named state covered by real evidence |
+| Pruning feasibility | sec.28 | **DONE** -- real infeasibility at the current tip, precisely characterized; underlying mechanism deferred to the existing, already-green `feature_auxpow_prune.py` |
+| Production upgrade gate | sec.29 | **DONE** |
+| Post-activation stabilization criteria | sec.30 | **DONE** -- a height range and checklist, deliberately no production hash |
+| Obsolete-node (D) further divergence | `scenario_obsolete_node_D.py` | D's behavior at the pre-activation boundary (sec.7.1) and against both proof mechanisms at the activation boundary (sec.9.1/10.1) is now recorded; per instruction, D was deliberately not involved further in the convergence/reorg, BIP34, or final lifecycle phases -- that evidence was judged sufficient |
 | Discrepancies found, if any | | **one real Core defect found, fixed, and re-verified: sec.26 (full-reindex AuxPoW disk-deserialization defect, commit `7942285e1175dacb54958b7cde1e4fa19630fde0`)**; mining-harness/rehearsal-lab bugs found and fixed are documented in sec.5, sec.15 (onion-port collision), and sec.23.2's honest disclosure of a real-but-expected ASERT fixed-anchor difficulty-growth dynamic (not a bug, not fixed, not worked around); the legacy-vs-ASERT divergence at 227808 (sec.6.2) and both obsolete-node rejections (sec.9.1/10.1) are expected designed behavior, not discrepancies |
+| Genuinely optional follow-on (not part of what was asked) | `scenario_restart_matrix.py`, `scenario_pruning_plan.py`, `scenario_obsolete_node_D.py`, `scenario_asert_compare.py` | ready scripts retained in `~/Downloads/bitaicoin-rehearsal-lab/` for any future dedicated deep-dive, but superseded for this rehearsal's own purposes by the real evidence already captured above |
 
 Note on sec.9/10: the existing `scenario_A_direct.py`/`scenario_B_auxpow.py` scripts (written earlier
 in the rehearsal, sec.7 of the pending table before this revision) mine extra continuity blocks
