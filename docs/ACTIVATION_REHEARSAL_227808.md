@@ -1567,10 +1567,17 @@ a hash:
 4. Substantial real post-activation history accumulates (a specific depth is deliberately not
    prescribed here -- this rehearsal establishes the *mechanism*, not a magic number for the real
    network's own organic growth).
-5. Real production node restart(s) pass (ordinary restart, and `-reindex-chainstate` specifically --
-   given sec.26's finding, a real production operator should prefer `-reindex-chainstate` over full
-   `-reindex` unless a full reindex is genuinely required, until/unless further hardening beyond this
-   rehearsal's scope is separately reviewed).
+5. Real production node restart(s) pass (ordinary restart, `-reindex`, and `-reindex-chainstate`).
+   **Historical finding vs. final release state, stated precisely so the two are never conflated**:
+   sec.26 found that full `-reindex` originally failed at the first AuxPoW block, because
+   `LoadExternalBlockFile()` used the wrong deserialization path. That defect is fixed in commit
+   `7942285e1175dacb54958b7cde1e4fa19630fde0`, and full `-reindex` has since passed against the real
+   227808 AuxPoW state, real mixed direct/AuxPoW history, the real mature post-BIP34 chain, and the
+   permanent functional regression test (sec.26.5-26.6, sec.27.1); `-reindex-chainstate` also passes.
+   On the fixed release, **both recovery paths are validated** -- an operator chooses between them
+   according to the actual recovery need (a full `-reindex` when the block index itself is suspect or
+   needs a full rebuild; `-reindex-chainstate` when only the UTXO set needs rebuilding from an
+   already-trusted block index), not because one is presumed less safe than the other.
 6. Real peer convergence is confirmed among real production nodes.
 7. No unexpected reorg, serialization, or DAA issue is observed on the real chain.
 8. Real production chain crosses BIP34 height 227931.
