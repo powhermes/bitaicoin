@@ -2,16 +2,17 @@
 
 **Status: IN PROGRESS.** This document is being built incrementally as the rehearsal proceeds.
 Sections marked `PENDING` have not happened yet and contain no fabricated data -- per the governing
-instruction, no 227808+ result is recorded before it actually exists. As of this revision: the real
-225823->227807 canonical mining run, its full provenance verification, the immutable
-golden-227807-pre-activation snapshot and its independent verification, the obsolete node D
-pre-activation compatibility record, the ASERT-vs-legacy computation for 227808 (corrected
-interpretation, sec.6.2), and **both Scenario A (direct) and Scenario B (AuxPoW) at the real 227808
-activation boundary -- including both obsolete-node observations and the structural A/B comparison --
-are now all complete and real (sec.6-12), and both PASS.** Canonical node A, both scenario nodes, and
-all D observation instances are stopped and preserved as read-only evidence. Multi-node
-convergence/reorg testing and everything past it (sec.13) remain deliberately not started, pending
-review of this report.
+instruction, no result is recorded before it actually exists. As of this revision: the real
+225823->227807 canonical mining run, the 227807 snapshot, Scenario A/B at the real activation
+boundary (sec.6-12), and the **full upgraded-node convergence/reorg/branch-local-ASERT phase --
+three-node mixed direct/AuxPoW convergence, a same-anchor activation-crossing reorg, a
+reverse-composition reorg, a branch-local ASERT anchor test with an anchor-leakage check and a
+wrong-bits subtest, and independent chainwork verification (sec.14-21)** -- are all complete, real,
+and PASS. Every node used in this phase is stopped; the preserved evidence from earlier phases
+(canonical node A, both golden snapshots, both scenario datadirs) was never reused or mutated. Per
+instruction, this phase stops here -- BIP34 height 227931, full fresh-node HEADERS sync, pruning, and
+stabilization-checkpoint selection (sec.22) remain deliberately not started, pending review of this
+report.
 
 ## 0. Purpose
 
@@ -682,41 +683,320 @@ Both obsolete-node observations (9.1, 10.1) surfaced real, distinct, correctly-r
 consistent with (not merely assumed to be) a genuine consensus fork at 227808 for a node running the
 obsolete binary, for two different underlying reasons depending on the proof mechanism used.
 
-## 13. Pending sections (will be completed once convergence/reorg testing begins)
+## 14. Documentation hygiene check (before this phase began)
+
+Before starting the convergence/reorg phase, the actual on-disk `docs/ACTIVATION_REHEARSAL_227808.md`
+was inspected directly (not the edit-transcript) for the specific duplicate/stale rows flagged as a
+possible concern (Scenario A/B marked both PENDING and DONE, duplicate ASERT-dynamic-verification
+rows, duplicate discrepancies rows). Verified by exact `grep -c` counts on the real file: every such
+row-key appeared exactly once (2 occurrences of a given phrase were always one section heading plus
+one table row correctly cross-referencing it, e.g. `## 9. Scenario A...` plus a `sec.9` table row --
+never two conflicting status rows for the same item). **No duplicates or stale PENDING/DONE conflicts
+were found in the actual file; no cleanup was necessary, and no result was altered.** No commit was
+made for this check per instruction ("commit only if the actual document required cleanup").
+
+## 15. Preserved evidence (untouched throughout this phase)
+
+Per instruction, the following were never reused or mutated during convergence/reorg testing; every
+experiment below used a fresh disposable clone instead:
+- canonical node A's evidence (`node-A/`, stopped)
+- `golden-227807-pre-activation/` (immutable)
+- Scenario A's completed direct-227808 datadir (`scenario-A-direct/`)
+- Scenario B's completed AuxPoW-227808 datadir (`scenario-B-auxpow/`)
+- `golden-D-227807-obsolete/` (immutable)
+
+New tooling for this phase, all in `~/Downloads/bitaicoin-rehearsal-lab/`: `phase2_common.py` (shared
+node lifecycle/RPC helpers, fresh port plan), `parallel_parent_solve.py` (a parallelized version of
+the synthetic-parent PoW solver -- rehearsal tooling only, not consensus; cuts real per-AuxPoW-block
+wall-clock time from ~24 minutes single-threaded to single-digit seconds to low minutes by splitting
+the real 32-bit nonce space across 8 OS processes, same "give each worker independent, disjoint search
+space" principle already used and verified for direct mining in `durable_miner.py`), `run_convergence.py`,
+`run_reorg_same_anchor.py`, `run_reorg_reverse.py`, `run_branch_local_asert.py`, `wrong_bits_subtest.py`.
+
+**Real infrastructure bug found and fixed before any of this phase's mining began**: `src/init.cpp`
+always binds a loopback "onion service target" address at `p2p_port + 1`, **regardless of
+`-listenonion`** (confirmed by reading `init.cpp`'s `default_bind_port_onion = default_bind_port + 1`
+and by direct observation that passing `-listenonion=0` did not stop the bind). A first attempt at
+sequential p2p ports (28830/28831/28832 for three nodes) meant each node's onion-target bind silently
+captured the *next* node's real p2p port, so `addnode`-initiated manual connections for two of three
+links never established (only the one link whose target port had no `+1` collision worked) --
+diagnosed via `getaddednodeinfo` showing `connected: false` indefinitely and via direct comparison of
+working vs. non-working nodes' `debug.log` "Bound to" lines. Fixed by spacing every p2p port in this
+phase's port plan by 10 (`phase2_common.py`'s `PORTS` dict), not by disabling onion (which does not
+actually help). Not a consensus issue; purely a rehearsal-lab port-planning bug in code that did not
+exist before this phase.
+
+## 16. Three-upgraded-node mixed direct/AuxPoW convergence (items 2-5)
+
+Three fresh nodes (`conv-A`, `conv-B`, `conv-C`), independently cloned from the same immutable
+`golden-227807-pre-activation` snapshot, all running the same upgraded binary/commit. Verified before
+connecting: all three at height 227807, all three `bestblockhash ==`
+`000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f`, all isolated (zero peers). Connected
+in a real full mesh over localhost only (`addnode` both directions between every pair) -- confirmed 2
+peers per node, no external peers at any point.
+
+**Mixed sequence actually mined** (real blocks, alternating miner and mechanism):
+
+| height | miner | mechanism | hash | bits | VERSION_AUXPOW | chainwork |
+|---|---|---|---|---|---|---|
+| 227808 | conv-A | direct | `000000028241d6a20ba5cda85d23a990a63a233c8484873f10490ff0a73e8288` | `1d0fb6d7` | unset | `...2e45f80fc09449597b` |
+| 227809 | conv-B | AuxPoW | `566c4f9ca2ac993709ec75bd2be3cfc36b3d447b906b41034f2919d125ddb4e8` | `1d0fffff` | **set** | `...2e45f80fc0a4495a7b` |
+| 227810 | conv-C | direct | `000000053e1457a08b0a31de80dda6233e331219bc23d80a536c627cdcae5022` | `1d0fffff` | unset | `...2e45f80fc0b4495b7b` |
+| 227811 | conv-A | AuxPoW | `50449791b525aa5d981693c43cfa8ea2ff717129726c6c1a97f66890651968ed` | `1d0fffff` | **set** | `...2e45f80fc0c4495c7b` |
+| 227812 | conv-B | direct | `0000000427257e94fa4ce696032c6971b5cd485251f8e31ca49299fd5cbf9192` | `1d0fffff` | unset | `...2e45f80fc0d4495d7b` |
+| 227813 | conv-C | AuxPoW | `862f0fa16317a1aa65e801dfc6740ce55374717a5970fda32681128382dc14f1` | `1d0fffff` | **set** | `...2e45f80fc0e4495e7b` |
+
+Real ASERT dynamism observed: 227808's bits (`1d0fb6d7`) tightened slightly from the anchor (real
+227806->227807 interval was only 37s); by 227809 the chain had already caught back up to/past its
+implied schedule (blocks arriving fast relative to ASERT's 21600s half-life), so ASERT eased back to
+its ceiling `1d0fffff` (`powLimit` itself) and stayed there through 227813 -- expected, correct dynamic
+behavior, not a bug.
+
+**Item 4 (DAA continuity), checked before every single block, on the actual mining node, before
+mining**: `getblocktemplate.bits` (direct) vs. `createauxblock.bits` (AuxPoW) queried together at
+every step -- **identical at all 6 steps** (`1d0fb6d7` at the first step, `1d0fffff` thereafter). The
+proof mechanism never forks DAA state.
+
+**After every single block** (not just the final height), independently verified on all three nodes:
+same best height, same best hash, same chainwork, same bits -- **converged after all 6 blocks, with
+zero exceptions**. `assert_converged()` compares real `getblockchaininfo` output across all three
+nodes at every step.
+
+### 16.1 Mixed-chain restart test (item 5)
+
+Stopped all three cleanly (`bitcoin-cli stop`, confirmed exit), restarted independently (not yet
+reconnected): all three preserved height=227813, identical hash/chainwork/bits **even before
+reconnecting** (each node has its own full copy of the chain; convergence does not depend on staying
+connected). All 6 blocks (3 direct, 3 AuxPoW) re-read via `getblock` after restart -- every field
+(height, bits, VERSION_AUXPOW, chainwork, prevhash) matched their pre-restart record exactly: **no
+AuxPoW proof/serialization corruption survives restart**. Reconnected (addnode not auto-persisted
+across restart in this setup, so reconnected explicitly) -- remained converged (same height/hash/
+chainwork) after reconnect.
+
+## 17. Same-anchor, activation-crossing competing-branch reorg (items 6-8)
+
+Two fresh, independent clones of `golden-227807-pre-activation` (`reorg-X`, `reorg-Y`), kept
+disconnected while each built its own competing branch.
+
+- X mined 227808 **DIRECT**: hash `00000006a19c73eb72812d5c1af9a3a7c2a41e268368cc125b770d92027bbb84`,
+  bits `1d0fb6d7`.
+- Y mined 227808 **AuxPoW**: hash `5481ecf2f8db787901fc418ade15fbb9910e6bd3e12de158690c52eb65327fd4`,
+  bits `1d0fb6d7`.
+- Both independently required and used **`1d0fb6d7`** (same real ASERT anchor); chainwork at this
+  step was exactly equal on both branches (same bits).
+
+**Extended to strictly unequal accumulated work**: X mined 227809 direct (X total: 2 direct blocks,
+chainwork `...2e45f80fc0a4495a7b`). Y mined 227809 AuxPoW then 227810 direct (Y total: 2 AuxPoW + 1
+direct = 3 blocks, chainwork `...2e45f80fc0b4495b7b`). Before reconnect: **Y strictly greater
+chainwork than X by 268,435,712 work units** (confirmed via real `int(chainwork,16)` comparison, not
+block count).
+
+**Real P2P reconnect and reorg** (X and Y connected via `addnode`, no restart):
+- Fork height: **227807** (`000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f`).
+- X's old tip: `0000000377ebd3464a61883a2d9bc4b74dcba6814b9c7707b2ae13ef98a21e2f` (height 227809, chainwork `...2e45f80fc0a4495a7b`).
+- Y's winning tip: `00000001b59d0d1e709cc52427ab9719a172dfa41ec49e5fece911ac44e50aa7` (height 227810, chainwork `...2e45f80fc0b4495b7b`).
+- Disconnected blocks (X's own): `00000006a19c73eb...` (227808 direct), `0000000377ebd346...` (227809 direct).
+- Connected blocks (Y's): `5481ecf2f8db7879...` (227808 AuxPoW), `01ff1e29e0e580e0...` (227809 AuxPoW), `00000001b59d0d1e...` (227810 direct).
+- Final: `X.besthash == Y.besthash == 00000001b59d0d1e...`; `X.chainwork == Y.chainwork == ...2e45f80fc0b4495b7b`.
+
+**Real log evidence, captured from X's own `debug.log`** (default log level, no extra `-debug` flags
+needed -- these lines are unconditional):
+```
+New manual peer connected: transport: v2, version: 70016, blocks=227810 peer=0
+Saw new header hash=00000001b59d0d1e709cc52427ab9719a172dfa41ec49e5fece911ac44e50aa7 height=227810 peer=0
+UpdateTip: new best=00000006a19c73eb... height=227808 version=0x20000000 ...   <- disconnecting X's 227809, back to X's own 227808
+UpdateTip: new best=000000029b79bf25... height=227807 version=0x20000000 ...   <- disconnecting X's 227808, back to the shared fork point 227807
+UpdateTip: new best=5481ecf2f8db7879... height=227808 version=0x42490100 ...   <- connecting Y's AuxPoW 227808 (VERSION_AUXPOW bit set in the logged version)
+UpdateTip: new best=01ff1e29e0e580e0... height=227809 version=0x42490100 ...   <- connecting Y's AuxPoW 227809
+UpdateTip: new best=00000001b59d0d1e... height=227810 version=0x20000000 ...   <- connecting Y's direct 227810
+```
+This is a genuine, real, **activation-crossing** reorg -- it disconnects a direct 227808/227809 pair
+and connects an AuxPoW 227808/AuxPoW 227809/direct 227810 triple, stepping back through the exact
+227807 legacy/ASERT boundary and forward again, entirely while X kept running (no restart). The `Saw
+new header` line confirms X received and accepted Y's AuxPoW-versioned headers directly over the
+upgraded P2P path during a real competing-branch event (not simple linear same-branch sync). Honest
+scope note: this run did not pass `-debug=net`, so the underlying `getdata`/`block` wire messages
+themselves were not separately logged; the unconditional `UpdateTip` sequence is still conclusive
+proof that each block was fully downloaded, validated, and connected (a `CBlockIndex`'s tip can only
+advance to it after that), just not raw-wire-message-level proof.
+
+### 17.1 Restart-after-reorg (item 17)
+
+Stopped X and Y cleanly, restarted independently: both retained the identical winning tip/chainwork.
+`getchaintips` on X shows the active tip at 227810 **and** X's own former losing branch correctly
+demoted to `{"height": 227809, ..., "branchlen": 2, "status": "valid-fork"}` (not vanished, not still
+"active"). Y's two AuxPoW blocks (227808, 227809) re-read via `getblock` after restart: `VERSION_AUXPOW`
+bit still correctly set, both fully readable, `nTx` intact -- no AuxPoW proof/serialization issue
+survives restart. (`getchaintips` also lists many `valid-headers` entries at heights 225803-225828 --
+these are pre-existing orphaned side-headers inherited from the original 10-way parallel canonical
+mining run, sec.5/6, harmless and unrelated to this reorg.)
+
+## 18. Reverse proof-mechanism dominance (item 7)
+
+Fresh clones (`reorgrev-X`, `reorgrev-Y`), disconnected, with the composition **reversed** from sec.17:
+this time the eventual *winner* is AuxPoW-heavy and has *more* blocks, and the loser is direct-heavy
+with *fewer* blocks -- the opposite pairing from sec.17 (there, the winner Y was also AuxPoW-heavy;
+here the letter and the "more blocks" side both flip relative to which one is being tested as
+AuxPoW-heavy, decoupling any accidental pattern).
+
+- X2 (winner-to-be): 227808 **AuxPoW**, 227809 **direct**, 227810 **AuxPoW** (3 blocks: 2 AuxPoW + 1 direct).
+- Y2 (loser-to-be): 227808 **direct**, 227809 **AuxPoW** (2 blocks: 1 direct + 1 AuxPoW).
+- Before reconnect: X2 chainwork `...2e45f80fc0b4495b7b` strictly greater than Y2's `...2e45f80fc0a4495a7b`
+  by 268,435,712 work units.
+- Reconnected Y2 to X2: **Y2 reorganized onto X2's branch.** Final: both at hash
+  `26e9be7317c5832454f1fdc06da4c67f235e49a9a84c223eb070ffc126449099`, both chainwork
+  `...2e45f80fc0b4495b7b`.
+- Disconnected (Y2's own): `000000037fc9d3ea...` (227808 direct), `bdda442378c43928...` (227809 AuxPoW).
+- Connected (X2's): `f9f7739180075ea0...` (227808 AuxPoW), `0000000f3e342c15...` (227809 direct), `26e9be7317c58324...` (227810 AuxPoW).
+
+**Confirms fork choice follows accumulated chainwork regardless of which branch has more direct vs.
+AuxPoW blocks** -- reversing which letter/composition wins from sec.17 changes nothing about the
+underlying rule. Restart-after-reorg repeated for this pair too: both nodes retained the identical
+tip/chainwork after an independent stop+restart.
+
+## 19. Branch-local ASERT anchor test (items 9-12)
+
+**Separate from sec.17's reorg test** -- this proves ASERT does not use a global/cached 227807 anchor,
+using isolated branches (never used for any P2P reorg claim, per item 10's explicit caution).
+
+**Constructing ALT** (goal-A construction only, real mining, no fabricated state): a disposable clone
+of `golden-227807-pre-activation` had `invalidateblock` called on the real 227807 hash (rolled back to
+227806, confirmed via `getblockchaininfo`), then mined a genuine, real, valid **alternative** 227807:
+hash `0000000488e73ce9354cc379fb9b6c5483cd67247297c68ac1827ce3a9aa9937`, bits `1d0fffff` (same legacy
+value -- same retarget period), real time `1790306794` (mined at real current wall-clock time, ~10.6
+hours after the ORIGINAL's real `1790268674` -- a large, natural, undirected difference, not forced).
+That construction node was stopped, and its resulting on-disk state was cloned into a **fresh** node
+(`branch-alt`) that never itself called `invalidateblock` -- avoiding any ambiguity about residual
+invalidity-marking state, per item 10.
+
+| | ORIGINAL | ALT |
+|---|---|---|
+| 227807 hash | `000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f` | `0000000488e73ce9354cc379fb9b6c5483cd67247297c68ac1827ce3a9aa9937` |
+| 227807 time | `1790268674` | `1790306794` |
+| 227806 time (shared) | `1790268637` | `1790268637` |
+| 227807 bits | `1d0fffff` | `1d0fffff` |
+| timeDiff for 227808 ASERT calc | 37s | 38157s |
+
+**Independently computed** (offline, `contrib/asert_reference.py`, before querying either real node):
+ORIGINAL-ancestry ASERT nBits for 227808 = **`0x1d0fb6d7`**; ALT-ancestry ASERT nBits for 227808 =
+**`0x1d0fffff`** (ALT's much larger real timeDiff, ~1.77 ASERT half-lives, pushes the target all the
+way to the `powLimit` ceiling).
+
+**Real node confirmation**: `getblocktemplate.bits` on branch-original = `1d0fb6d7` (matches); on
+branch-alt = `1d0fffff` (matches). **The two branches' real nodes independently returned different,
+correct, ancestry-specific values -- exactly matching each branch's own offline computation.**
+
+### 19.1 Anchor-leakage check (item 11)
+
+Queried in order A (ALT, then ORIGINAL) and, after independently restarting both nodes, in order B
+(ORIGINAL, then ALT): each branch returned the **identical** `bits` value both times, regardless of
+query order or the other branch's intervening queries/restarts --
+`gbt_orig_1["bits"] == gbt_orig_2["bits"]` and `gbt_alt_1["bits"] == gbt_alt_2["bits"]`, both true.
+**No global/cached anchor, no stale `CBlockIndex` reuse, no branch-insensitive ASERT state** -- each
+result derives solely from that node's own active branch, exactly as `src/pow.cpp`'s
+`pindexLast->GetAncestor(...)` (branch-relative by construction) predicts.
+
+### 19.2 Real differing-anchor blocks mined (item 12)
+
+A real 227808 was mined on **each** branch using **that branch's own** required bits: ORIGINAL ->
+hash `0000000e5db822034e9b3e44e099890f369bb101a06f407c29a07eeea6cc1287`, bits `1d0fb6d7`, accepted. ALT
+-> hash `000000006c56e227aff7ec146c4103a669e7e896448939f54e0887229f39e764`, bits `1d0fffff`, accepted.
+
+**Wrong-bits subtest (optional, attempted and succeeded -- no invasive Core changes)**: constructed a
+real, byte-exact-format segwit coinbase (BIP34 height push + dummy extranonce byte + P2WPKH payout +
+the node's own real `default_witness_commitment`, matching the exact layout reverse-engineered from
+this rehearsal's own captured real coinbase hex) for a candidate block with **prevhash = ALT's real
+227807** but **bits = ORIGINAL's required value (`0x1d0fb6d7`)** instead of ALT's own correct
+`0x1d0fffff`. Solved real PoW against that (deliberately wrong-for-this-ancestry, harder) target using
+the parallelized solver, then submitted via `submitblock`.
+
+**Result: `submitblock` returned `'bad-diffbits'`, and the node's state was completely unchanged**
+(still exactly at ALT's real 227807, height/hash unaffected) -- a clean, unambiguous rejection for
+precisely the deliberate defect, with no unrelated structural error, confirming the same `bad-diffbits`
+mechanism observed against node D (sec.9.1) also fires correctly for an upgraded node given a
+same-height-but-wrong-ancestry-bits block.
+
+## 20. Chainwork verification (item 13)
+
+Independently computed expected per-block chainwork as `2**256 // (target + 1)` from each block's own
+real `bits` (the same formula `GetBlockProof()` implements) and compared against every real observed
+chainwork delta across the mixed convergence sequence (sec.16):
+
+| height | mechanism | bits | observed delta | independently computed | match |
+|---|---|---|---|---|---|
+| 227808 | direct | `1d0fb6d7` | 273317275 | 273317275 | **yes** |
+| 227809 | AuxPoW | `1d0fffff` | 268435712 | 268435712 | **yes** |
+| 227810 | direct | `1d0fffff` | 268435712 | 268435712 | **yes** |
+| 227811 | AuxPoW | `1d0fffff` | 268435712 | 268435712 | **yes** |
+| 227812 | direct | `1d0fffff` | 268435712 | 268435712 | **yes** |
+| 227813 | AuxPoW | `1d0fffff` | 268435712 | 268435712 | **yes** |
+
+**Direct vs. AuxPoW at identical bits**: Scenario A (direct, sec.9) and Scenario B (AuxPoW, sec.10),
+both at `1d0fb6d7`, both independently compute to exactly 273,317,275 -- matching their real, identical
+`chainwork` field exactly. **Proof mechanism contributes zero difference to work.**
+
+**Harder-target proportionality**: `work(0x1d0fb6d7) / work(0x1d0fffff)` = **1.0181852**, matching the
+independently predicted ASERT/anchor target ratio (sec.6.2, ~1.018185) to 6 significant figures.
+
+**Fork choice follows summed chainwork, not block count**: every winner-determination in sec.17/18 was
+computed via real `int(chainwork, 16)` comparison, never block count; sec.18 additionally varies which
+side has more blocks vs. more work-per-block composition, and the accumulated-chainwork comparison
+remains the correct and only predictor of the real reorg outcome in both directions.
+
+## 21. Summary: this phase's expected conditions, all met
+
+| condition | expected | observed |
+|---|---|---|
+| Mixed-proof A/B/C convergence | converges after every block | **converged after all 6/6 blocks** |
+| Same-anchor activation-crossing reorg | more-work branch wins, crosses 227807 cleanly | **PASS** -- Y won, real log-verified disconnect/connect across the boundary |
+| Reverse-composition reorg | more-work branch wins regardless of AuxPoW/direct mix | **PASS** -- X2 (AuxPoW-heavy) won |
+| Direct/AuxPoW fork choice follows chainwork | never block count alone | **PASS** -- verified mathematically, sec.20 |
+| Branch-local ASERT anchor selection | each branch computes its own anchor, no leakage | **PASS** -- differing nBits per branch, no leakage either query order |
+| Restart-after-reorg (both reorg tests) | tip/chainwork persist, losing branch demoted not vanished, no AuxPoW corruption | **PASS** |
+
+No consensus or RPC code was changed at any point in this phase. The one real bug found (sec.15's
+onion-port collision) is rehearsal-lab infrastructure, not BitAIcoin consensus code. Per instruction,
+this phase stops here: **not** proceeding to BIP34 height 227931, full fresh-node HEADERS sync,
+pruning, or stabilization-checkpoint selection until this report is reviewed.
+
+## 22. Pending sections (will be completed once BIP34/HEADERS/pruning/checkpoint work begins)
 
 All tooling below is written and ready in `~/Downloads/bitaicoin-rehearsal-lab/` -- each script is a
-real, runnable implementation (not a placeholder), verified to import/parse correctly. The
-225823->227807 canonical run, its provenance verification, the golden-227807 snapshot, its
-independent verification, D's pre-activation record, the ASERT-vs-legacy computation for 227808, and
-now both Scenario A (direct) and Scenario B (AuxPoW) at the real 227808 activation boundary --
-including both obsolete-node observations and the structural A/B comparison -- (sec.6-12) are all
-real, complete, and PASS. Multi-node convergence/reorg testing (sec.13's remaining items) has not
-been run yet -- deliberately not started until this report is delivered and reviewed, per instruction.
+real, runnable implementation (not a placeholder), verified to import/parse correctly. Everything
+through sec.6-21 (the canonical 225823->227807 run, the 227807 snapshot, Scenario A/B at the real
+activation boundary, and the full upgraded-node convergence/reorg/branch-local-ASERT phase) is now
+real, complete, and PASS. **BIP34 height 227931, full fresh-node HEADERS sync, pruning, and
+stabilization-checkpoint selection remain deliberately not started**, pending review of this report.
 No result for any of the following exists yet; none will be fabricated or assumed:
 
 | item | script | status |
 |---|---|---|
-| shared node/RPC config | `lab_common.py` | ready |
+| shared node/RPC config | `lab_common.py` / `phase2_common.py` | ready |
 | 227807 snapshot capture + verification | sec.7 | **DONE -- PASS** |
 | D pre-activation compatibility record | sec.7.1 | **DONE -- PASS** |
-| ASERT anchor computation + legacy-vs-ASERT comparison for 227808 (corrected interpretation) | sec.6.2/6.2a | **DONE -- PASS** (computed, then live-confirmed by real `getblocktemplate` in sec.9) |
+| ASERT anchor computation + legacy-vs-ASERT comparison for 227808 (corrected interpretation) | sec.6.2/6.2a | **DONE -- PASS** (computed, then live-confirmed by real `getblocktemplate` in sec.9 and again independently in sec.19) |
 | Automated 1,984-block provenance verification | sec.6.3 | **DONE -- PASS** |
-| Scenario A: first activation block, DIRECT | sec.9 (custom precise run, `scenario_A_direct.py` reviewed but not used as-is -- see note below) | **DONE -- PASS** |
+| Scenario A: first activation block, DIRECT | sec.9 | **DONE -- PASS** |
 | Obsolete node D vs. Scenario A | sec.9.1 | **DONE** -- real rejection, `bad-diffbits` |
-| Scenario B: first activation block, AuxPoW | sec.10 (`run_scenario_b.py`, built on the frozen coordinator; `scenario_B_auxpow.py` reviewed but not used as-is) | **DONE -- PASS** |
+| Scenario B: first activation block, AuxPoW | sec.10 | **DONE -- PASS** |
 | Obsolete node D vs. Scenario B | sec.10.1 | **DONE** -- real rejection, distinct reason (`header with invalid proof of work`) |
-| Structural A vs. B comparison | sec.11 | **DONE -- PASS** (identical parent/prevhash/bits/chainwork, different hash) |
-| Three-upgraded-node convergence (A/B/C) | `scenario_convergence.py` | ready, PENDING run |
-| Competing-branch/reorg test | `scenario_reorg.py` | ready (base case; differing-anchor variant is a documented follow-up), PENDING run |
-| ASERT dynamic verification (real heights, independent reference) | `scenario_asert_compare.py` | superseded by sec.9's live `getblocktemplate` confirmation; may still be run for the differing-anchor/BIP34-boundary follow-up cases |
+| Structural A vs. B comparison | sec.11 | **DONE -- PASS** |
+| Three-upgraded-node mixed direct/AuxPoW convergence (A/B/C) | sec.16 (`run_convergence.py`) | **DONE -- PASS**, converged after all 6/6 blocks |
+| Mixed-chain restart test | sec.16.1 | **DONE -- PASS**, no AuxPoW corruption |
+| Same-anchor activation-crossing reorg | sec.17 (`run_reorg_same_anchor.py`) | **DONE -- PASS**, real log-verified disconnect/connect |
+| Restart-after-reorg | sec.17.1 | **DONE -- PASS** |
+| Reverse proof-mechanism-dominance reorg | sec.18 (`run_reorg_reverse.py`) | **DONE -- PASS** |
+| Branch-local ASERT anchor test (incl. anchor-leakage check + wrong-bits subtest) | sec.19-19.2 (`run_branch_local_asert.py`, `wrong_bits_subtest.py`) | **DONE -- PASS**, including the optional wrong-bits `bad-diffbits` confirmation |
+| Chainwork mathematical verification | sec.20 | **DONE -- PASS**, matches to 6+ significant figures |
+| ASERT dynamic verification (real heights, independent reference) | `scenario_asert_compare.py` | superseded by sec.9's and sec.19's live confirmations; the original script remains available for a future standalone run if wanted |
 | BIP34 boundary (227931) crossing | `scenario_bip34.py` | ready, PENDING run |
 | Restart/reindex matrix | `scenario_restart_matrix.py` | ready, PENDING run at each required height |
-| HEADERS-first synchronization | `scenario_headers_sync.py` | ready, PENDING run |
+| HEADERS-first synchronization (fresh-node milestone) | `scenario_headers_sync.py` | ready, PENDING run -- explicitly deferred (item 14 of this phase's instructions): sec.17's reorg already exercised real AuxPoW header propagation during a competing-branch event, but not yet the dedicated fresh-node HEADERS-first milestone |
 | Pruning rehearsal | `scenario_pruning_plan.py` | ready; includes an honest feasibility check against the real 550 MiB prune floor, with `feature_auxpow_prune.py` as the documented fallback authority if infeasible at these heights |
-| Obsolete-node (D) further divergence (convergence/reorg phase) | `scenario_obsolete_node_D.py` | ready, PENDING run (D's pre- and post-activation-boundary behavior against both proof mechanisms is now recorded, sec.7.1/9.1/10.1) |
-| Upgrade gate statement | (sec.15 of the spec) | PENDING |
-| Post-activation stabilization checkpoint candidate | (sec.16 of the spec) | PENDING |
-| Discrepancies found, if any | | none found in consensus code; mining-harness bugs found and fixed are documented in sec.5; the legacy-vs-ASERT divergence at 227808 (sec.6.2) and both obsolete-node rejections (sec.9.1/10.1) are expected designed behavior, not discrepancies |
+| Obsolete-node (D) further divergence | `scenario_obsolete_node_D.py` | D's behavior at the pre-activation boundary (sec.7.1) and against both proof mechanisms at the activation boundary (sec.9.1/10.1) is now recorded; per instruction (item 16 of this phase), D was deliberately not involved further in the upgraded-node convergence/reorg experiments -- that evidence was judged sufficient for now |
+| Upgrade gate statement | (sec.15 of the original spec) | PENDING |
+| Post-activation stabilization checkpoint candidate | (sec.16 of the original spec) | PENDING |
+| Discrepancies found, if any | | none found in consensus code; mining-harness/rehearsal-lab bugs found and fixed are documented in sec.5 and sec.15 (onion-port collision); the legacy-vs-ASERT divergence at 227808 (sec.6.2) and both obsolete-node rejections (sec.9.1/10.1) are expected designed behavior, not discrepancies |
 
 Note on sec.9/10: the existing `scenario_A_direct.py`/`scenario_B_auxpow.py` scripts (written earlier
 in the rehearsal, sec.7 of the pending table before this revision) mine extra continuity blocks
