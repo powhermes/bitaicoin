@@ -11,13 +11,22 @@ honestly to 227928, the real BIP34Height parameter and its exact enforcement sem
 source, a normal direct+AuxPoW sequence across the boundary, a wrong-child-height rejection
 (`bad-cb-height`) immediately after activation, the matching pre-activation control (accepted, no
 enforcement yet), DAA/chainwork continuity across the boundary, restart persistence, and a reorg
-crossing 227931 -- are all complete, real, and PASS. Every node used in every phase is stopped; the
-preserved evidence from earlier phases (canonical node A, both golden 227807/227928 snapshot sources,
-both Scenario A/B datadirs) was never reused or mutated. One honest, non-blocking finding is disclosed
-in sec.23.2 (ASERT's fixed anchor causes real, expected difficulty growth when a gap is mined faster
-than nominal spacing -- not a bug, not fixed). Per instruction, this phase stops here -- full
-fresh-node HEADERS sync, pruning, and stabilization-checkpoint selection (sec.24) remain deliberately
-not started, pending review of this report.
+crossing 227931 -- are all complete, real, and PASS (BIP34 phase reviewed and approved). Every node
+used in every phase is stopped; the preserved evidence from earlier phases (canonical node A, both
+golden 227807/227928 snapshot sources, both Scenario A/B datadirs) was never reused or mutated. Two
+corrections from source audits are folded in: sec.23.0 (`BIP34Hash` is an inert BIP30-skip
+optimization gate, unrelated to BIP34's own enforcement -- an earlier claim about it was misleading)
+and sec.23.2's precise, corrected ASERT fixed-anchor wording (real, expected difficulty growth when a
+gap is mined faster than nominal spacing -- not a bug, not fixed, matches the frozen design intent).
+
+The **final lifecycle phase** is now underway: fresh-node HEADERS-first/full synchronization
+(sec.25.1) is complete, real, and PASS. Reindex validation (Part 2) surfaced **a real, confirmed Core
+defect** -- full `-reindex` silently truncated the chain at the first AuxPoW block (sec.26). Per
+instruction, all further final-phase work paused the moment this was confirmed; the defect was fixed
+and re-verified on its own narrowly-scoped track (commit `7942285e1175dacb54958b7cde1e4fa19630fde0`,
+pushed) before this document was updated. The remainder of the final lifecycle phase (sec.27:
+consolidated restart/reindex matrix, pruning, upgrade gate, stabilization criteria) remains
+deliberately not started, pending review of this report.
 
 ## 0. Purpose
 
@@ -1262,16 +1271,197 @@ rehearsal stops here: **not** proceeding to full fresh-node HEADERS-first sync, 
 chainstate matrix beyond what this phase needed, pruning, or stabilization-checkpoint selection until
 this report is reviewed.
 
-## 24. Pending sections (will be completed once HEADERS/pruning/checkpoint work begins)
+## 25. Final lifecycle phase, part 1: process hygiene and fresh-node HEADERS/full sync
+
+Preserved throughout, never reused/mutated: canonical node A, `golden-227807-pre-activation`,
+`golden-227928-pre-bip34`, both Scenario A/B evidence datadirs, all convergence/reorg evidence,
+`boundary-normal`.
+
+**Process hygiene**: inventoried all rehearsal-related processes before starting. Found and killed one
+genuinely stale, silently-CPU-consuming (~95 real minutes, 0.1-20% CPU) wedged process tree, traced
+exactly to an earlier multiprocessing-from-stdin bug (macOS `spawn` requires a real backing `.py` file;
+an inline heredoc invocation has none, so worker respawns fail, and in this case the parent hung
+indefinitely rather than raising). Two other `resource_tracker` stub processes were confirmed, by their
+own command-line/timestamp, to belong to an unrelated project/session and were left untouched per
+instruction not to kill an unknown process blindly. All preserved evidence datadirs confirmed idle (no
+actively-held lock).
+
+### 25.1 Fresh-node HEADERS-first / full synchronization
+
+Real SOURCE (`sync-source`, fresh clone of `boundary-reorgX`'s real height-227933 mixed direct/AuxPoW/
+BIP34 history, not pruned, exact upgraded binary, isolated) and a **genuinely empty** DESTINATION
+(`sync-destination`, no copied blocks/chainstate/indexes/snapshot -- confirmed height 0, real genesis
+hash, before connecting). Connected DESTINATION only to SOURCE; this is a real initial sync, not
+filesystem state transfer.
+
+**Headers-first behavior, real timing evidence**: all bulk `headers` P2P messages completed within 26
+real seconds of connecting (`headers` climbed to the full real tip, 227933, almost immediately, while
+`blocks` was still 0); block validation then took ~6 more real minutes to climb from 0 to 227933 --
+`UpdateTip` lines for every one of the named boundary heights (225429 fork anchor, 227807 last legacy
+block, 227808 first ASERT/AuxPoW-capable height, 227930 pre-BIP34, 227931 first BIP34-enforced height,
+227932 post-BIP34 AuxPoW) were all captured with real timestamps confirming this real, correct
+headers-then-blocks ordering.
+
+**Representative blocks, DESTINATION vs. SOURCE, all matching exactly** (hash, height, prevhash, bits,
+version, VERSION_AUXPOW state, chainwork): 225429, 227807, 227808, 227930, 227931 (the real AuxPoW
+block, `VERSION_AUXPOW` correctly set), 227932, 227933.
+
+**Convergence**: `SOURCE.bestblockhash == DESTINATION.bestblockhash`,
+`SOURCE.height == DESTINATION.height`, `SOURCE.chainwork == DESTINATION.chainwork`,
+`DESTINATION.headers == DESTINATION.blocks` -- all confirmed exactly. Restarted DESTINATION with SOURCE
+disconnected/stopped: identical tip/chainwork retained. Reconnected: no state change (already fully
+converged).
+
+**AuxPoW HEADERS/transport evidence, precisely distinguished (not conflated)**: the real AuxPoW block
+(227931) was downloaded during IBD via genuine per-block `getdata`/`block` **full-BLOCK transport**
+(`received: block (486 bytes) peer=0` -- the larger size vs. an ordinary block's `251 bytes`,
+consistent with the serialized `CAuxPow` proof), distinct from the earlier bulk `headers` messages used
+for header sync, and never via compact-block relay (not used during IBD in this implementation, only
+for near-tip live relay). `Saw new header hash=...227931... peer=0` (an unconditional, always-logged
+line) confirms X received and accepted Y's real AuxPoW-versioned header directly over the upgraded P2P
+path. Honest scope note: this run did not pass `-debug=net`, so the raw `getdata` wire message itself
+was not separately logged; the unconditional `UpdateTip` sequence plus the explicit `received: block`
+size evidence is still conclusive (a `CBlockIndex`'s tip cannot advance to a block without it having
+been fully downloaded and validated).
+
+**Result: Part 1 complete, real, PASS in full.**
+
+## 26. Discrepancy found and fixed: full `-reindex` silently truncated the chain at the first AuxPoW block
+
+**Found** during Part 2 (reindex/reindex-chainstate validation) of the final lifecycle phase. Per
+instruction, all further final-phase work (Parts 3-9: consolidated restart/reindex matrix, pruning,
+upgrade gate, stabilization criteria) was **paused** the moment this was confirmed, and the fix was
+made on its own narrowly-scoped track before resuming. This section preserves the original failure
+evidence exactly as observed -- it is not rewritten to make the rehearsal look as though it passed the
+first time.
+
+### 26.1 Evidence frozen before any investigation or fix
+
+- Source commit (binary build baseline): `519d3d9eab9a0dcbc084d88e9d78849d5f0cdd28`
+- Binary SHA-256 (pre-fix, as originally tested): `c7a5c8f5627b3d33d069fc90d760957685f4a0b6dc506c0d38ecc761fe3da93e`
+- Failing datadir: fresh clone of the preserved `scenario-B-auxpow` evidence (never itself modified)
+- First AuxPoW block hash: `551982b3837caf9482f5b85da5c607d808483c3938b96ab0449ac172238ef0cd` (height 227808)
+- BEFORE `-reindex`: height=227808, hash=`551982b3...`, chainwork=`...2e45f80fc09449597b`
+- AFTER `-reindex` (failed): height=227807, hash=`000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f`, chainwork=`...2e45f80fc083fedbe0` -- silently truncated one block short, no fatal error, node reports itself healthy
+- Exact log rejection, captured verbatim: `[validation] AcceptBlockHeader: Consensus::CheckBlockHeader: 551982b3837caf9482f5b85da5c607d808483c3938b96ab0449ac172238ef0cd, auxpow-missing, AUXPOW version bit set but no AuxPoW proof attached`
+- Confirmed (fresh clone of the same original evidence): ordinary restart reads the real 227808 AuxPoW state correctly
+- Confirmed (fresh clone of the same original evidence): `-reindex-chainstate` alone passes cleanly, reaching height 227808 with the AuxPoW block intact
+
+A permanent, frozen, read-only regression fixture (`regression-evidence-prefix-reindex-bug/`, with a
+README recording all of the above) reproduces this failure exactly and was never touched again after
+creation, for before/after comparison.
+
+### 26.2 Full disk-serialization audit (performed before any edit)
+
+| path | function | serializer/wrapper | chain-awareness |
+|---|---|---|---|
+| WRITE to blk*.dat | `BlockManager::WriteBlock` (`node/blockstorage.cpp`) | `AuxPowBlockForSend(block, auxpowEnabled)` | correct |
+| NORMAL on-demand read (RPC `getblock`, restarts, reorgs) | `BlockManager::ReadBlock` | `AuxPowBlockForRecv(block, GetConsensus().fBitAIAuxpowEnabled)` | correct |
+| header-only read (`LoadBlockIndexGuts`/`GetHeaderForAnnounce`) | `ReadBlockHeaderWithAuxPow` | `UnserializeBlockHeaderWithAuxPow` | correct |
+| P2P send/receive | `net_processing.cpp` | `AuxPowBlockForSend`/`AuxPowBlockForRecv` | correct |
+| REST / raw-block decode | `rest.cpp`, `core_io.cpp` | `AuxPowBlockForRecv` | correct |
+| **full `-reindex` read** | `ChainstateManager::LoadExternalBlockFile` (`validation.cpp`) | plain `blkdat >> TX_WITH_WITNESS(*pblock)` | **INCORRECT -- the one gap** |
+| **`-loadblock=<file>` external import** | same `LoadExternalBlockFile` (via `node::ImportBlocks`, confirmed the identical function powers both `-reindex`'s blk*.dat rescan and `-loadblock`'s external-file import) | same plain read | **INCORRECT, same root cause** |
+| disabled chains (MAIN/TESTNET/TESTNET4/SIGNET) | n/a -- `fBitAIAuxpowEnabled` defaults `false`, only BitAIcoin's own chain type and regtest set it `true` (confirmed in `chainparams.cpp`) | `AuxPowBlockForRecv`'s own `if (auxpowEnabled && header.IsAuxpow())` gate | never attempts a proof read regardless of bit 8; byte-identical to the old plain read on these chains |
+
+### 26.3 Root cause
+
+`ChainstateManager::LoadExternalBlockFile()` deserialized blocks read back from `blk*.dat` with plain,
+non-AuxPoW-aware `CBlock` deserialization -- the one block-read call site in the entire codebase that
+did not use the chain-aware wrapper every other site already used. The on-disk bytes were always
+correct and complete (the write path is, and always was, correct); only this specific read path failed
+to reconstruct the in-memory block's `auxpow` field, which then correctly (from
+`CheckBlockHeader`'s own narrow perspective) rejected the resulting incomplete-looking block.
+
+### 26.4 Fix
+
+Commit `7942285e1175dacb54958b7cde1e4fa19630fde0`: the smallest correct read-path change -- replaced
+the plain deserialization with `AuxPowBlockForRecv(*pblock, GetConsensus().fBitAIAuxpowEnabled)`, the
+exact same wrapper the normal read path already uses, reusing the existing abstraction rather than
+inventing a new one. No consensus rule, chain ID, `VERSION_AUXPOW` semantics, ASERT, activation height,
+block hash calculation, disk format, RPC surface, BIP34 logic, or candidate-cache/proof-ownership model
+was changed.
+
+### 26.5 Regression coverage
+
+`test/functional/feature_auxpow_reindex.py` (registered in `test_runner.py`, alongside fixing a
+pre-existing, unrelated gap where `feature_auxpow_createauxblock_ibd.py` was never registered there
+either). Builds a real regtest chain where the very first block after genesis is itself AuxPoW (the
+literal failing shape -- BitAIcoin's real `BitAIAuxpowActivationHeight=1`/`fBitAIAuxpowEnabled=true` on
+regtest, confirmed in `chainparams.cpp`), interleaved with direct blocks
+(AuxPoW/direct/AuxPoW/direct/AuxPoW/direct), plus a real descendant after the final AuxPoW block so a
+regression shows as truncation, not merely "failed to extend." Runs full `-reindex`,
+`-reindex-chainstate`, and a `-loadblock=<file>` external import of the same real `blk00000.dat`
+(exercising all three real callers of the shared function), requiring byte-identical final
+height/hash/chainwork and correct `VERSION_AUXPOW`/proof decoding in every case. **Confirmed the test
+itself is real**: fails exactly at the predicted point (truncates to genesis) against the pre-fix
+binary; passes cleanly against the fix.
+
+### 26.6 Re-verification against the real rehearsal fixtures (post-fix)
+
+- Fresh clone of `scenario-B-auxpow`: full `-reindex` now reaches height 227808, hash
+  `551982b3...` exactly, chainwork exactly matching pre-reindex, zero `auxpow-missing` occurrences,
+  AuxPoW block fully readable with proof intact.
+- Fresh clone of the real mature mixed post-BIP34 state (`boundary-reorgX`, height 227933): full
+  `-reindex` reaches height 227933, hash `0000000245e9c756...` exactly, chainwork matching exactly,
+  zero `auxpow-missing` occurrences; the one real AuxPoW block in this history (height 227931) survives
+  correctly.
+- `-reindex-chainstate` re-run post-fix on both: still passes, unaffected by the read-path change (it
+  never calls the changed function).
+- Existing real-chain history unchanged: node-A's real 225823 hash
+  (`0000000ad1060dd6b63a31796c4d57977c7f009eb0229b32d0b15dd303ecff57`) and the immutable
+  `golden-227807-pre-activation` snapshot hash
+  (`000000029b79bf2511fd42880959cd5637a435b1d042f1d14207407e8927e64f`) both read correctly, unchanged,
+  with the fixed binary.
+- C++ suite: `auxpow_tests` (52 cases) and the full suite (811 cases) both pass. Functional:
+  `feature_auxpow_prune.py`, `feature_auxpow_rpc.py`, `feature_auxpow_rpc_disabled_chains.py`,
+  `feature_auxpow_createauxblock_ibd.py`, the new `feature_auxpow_reindex.py`, the stock
+  `feature_reindex.py`/`feature_reindex_init.py`/`feature_reindex_readonly.py`, `mining_basic.py`, and
+  `feature_block.py` all pass.
+- A handful of unrelated functional tests intermittently failed with generic P2P/RPC connection
+  timeouts under sustained parallel (`-j 6`) or rapid sequential execution on this machine. **Not
+  dismissed without investigation**: a controlled, otherwise-identical comparison against the
+  unmodified pre-fix binary reproduced the same broad, run-to-run-varying set of unrelated failures
+  (mining/wallet/p2p/mempool/tool tests unrelated to AuxPoW or reindex code), and every affected test
+  passed cleanly when re-run in isolation. This is real, pre-existing environmental flakiness on this
+  machine, confirmed identical with and without the fix -- not a regression from this change.
+
+### 26.7 Severity
+
+**"Full-reindex AuxPoW disk-deserialization defect."** A recovery/read-path bug, not a chain-split bug,
+not a security/consensus defect, but serious enough to require fixing before any release that could
+reach real AuxPoW-active history:
+
+- Affects full `-reindex` (and the same-function `-loadblock` external import) after any real AuxPoW
+  block exists on disk.
+- Can silently truncate active history at the first AuxPoW block, with the node presenting itself as a
+  healthy, fully-synced node at the truncated height -- an operator recovery risk.
+- Does **not** invalidate already-running nodes.
+- Does **not** affect ordinary restart.
+- Does **not** affect live P2P validation/sync (confirmed extensively throughout this entire
+  rehearsal, including this same phase's own fresh-node full IBD, sec.25.1).
+- Does **not** affect `-reindex-chainstate`.
+- Does **not** imply existing `blk*.dat` bytes are corrupt (they were always correct and complete).
+- Does **not** change any consensus rule.
+
+### 26.8 Status
+
+**Resolved and re-tested.** Fixed in commit `7942285e1175dacb54958b7cde1e4fa19630fde0`, pushed to
+`origin/bitaicoin-phase1`. The final lifecycle phase resumes from where it paused (Part 2's remaining
+items) in a subsequent pass of this same document.
+
+## 27. Pending sections (will be completed once the remainder of the final lifecycle phase runs)
 
 All tooling below is written and ready in `~/Downloads/bitaicoin-rehearsal-lab/` -- each script is a
 real, runnable implementation (not a placeholder), verified to import/parse correctly. Everything
 through sec.6-23 (the canonical 225823->227807 run, the 227807 snapshot, Scenario A/B at the real
-activation boundary, the full upgraded-node convergence/reorg/branch-local-ASERT phase, and now the
-real BIP34 height 227931 boundary rehearsal) is real, complete, and PASS. **Full fresh-node HEADERS
-sync, pruning, and stabilization-checkpoint selection remain deliberately not started**, pending
-review of this report. No result for any of the following exists yet; none will be fabricated or
-assumed:
+activation boundary, the full upgraded-node convergence/reorg/branch-local-ASERT phase, and the real
+BIP34 height 227931 boundary rehearsal) plus sec.25.1 (fresh-node HEADERS-first/full sync) is real,
+complete, and PASS. **A real reindex defect was found, fixed, and re-verified (sec.26)** -- fixed in
+commit `7942285e1175dacb54958b7cde1e4fa19630fde0`. The remainder of the final lifecycle phase
+(consolidated restart/reindex matrix beyond what sec.26.6 already re-verified, pruning, the upgrade
+gate, and stabilization criteria) remains to be run in a subsequent pass. No result for any of the
+following exists yet; none will be fabricated or assumed:
 
 | item | script | status |
 |---|---|---|
@@ -1294,13 +1484,16 @@ assumed:
 | Chainwork mathematical verification | sec.20 | **DONE -- PASS**, matches to 6+ significant figures |
 | ASERT dynamic verification (real heights, independent reference) | `scenario_asert_compare.py` | superseded by sec.9's, sec.19's, and sec.23.8's live confirmations; the original script remains available for a future standalone run if wanted |
 | BIP34 boundary (227931) crossing | sec.23 (`run_bip34_normal.py`, `run_bip34_control.py`, `run_bip34_reorg.py`, `manual_block.py`, `mine_gap.py`) | **DONE -- PASS**, including the wrong-height/control pair and a boundary-crossing reorg |
-| Restart/reindex matrix | `scenario_restart_matrix.py` | partially covered by sec.23.9's boundary restart and sec.16.1/17.1/18/23.10's reorg restarts; a dedicated full-matrix run at every required height remains ready, PENDING |
-| HEADERS-first synchronization (fresh-node milestone) | `scenario_headers_sync.py` | ready, PENDING run -- explicitly deferred: sec.17/23.10's reorgs already exercised real AuxPoW/BIP34 header propagation during competing-branch events, but not yet the dedicated fresh-node HEADERS-first milestone |
+| BIP34Hash source audit (correcting an earlier misleading report claim) | sec.23.0 | **DONE** -- inert BIP30-skip optimization gate, fully independent of BIP34's own enforcement, no Core change |
+| Fresh-node HEADERS-first / full synchronization | sec.25.1 | **DONE -- PASS** |
+| Full `-reindex` AuxPoW disk-deserialization defect | sec.26 | **FOUND, FIXED, RE-VERIFIED** -- commit `7942285e1175dacb54958b7cde1e4fa19630fde0` |
+| `-reindex-chainstate` (unaffected by the defect, re-confirmed post-fix) | sec.26.6 | **DONE -- PASS** |
+| Consolidated restart/reindex matrix (beyond sec.26.6's re-verification) | `scenario_restart_matrix.py` | partially covered by sec.23.9/26.6 and sec.16.1/17.1/18/23.10's reorg restarts; a dedicated full-matrix run at every required height remains ready, PENDING |
 | Pruning rehearsal | `scenario_pruning_plan.py` | ready; includes an honest feasibility check against the real 550 MiB prune floor, with `feature_auxpow_prune.py` as the documented fallback authority if infeasible at these heights |
 | Obsolete-node (D) further divergence | `scenario_obsolete_node_D.py` | D's behavior at the pre-activation boundary (sec.7.1) and against both proof mechanisms at the activation boundary (sec.9.1/10.1) is now recorded; per instruction, D was deliberately not involved further in either the convergence/reorg phase or the BIP34 phase -- that evidence was judged sufficient for now |
-| Upgrade gate statement | (sec.15 of the original spec) | PENDING |
-| Post-activation stabilization checkpoint candidate | (sec.16 of the original spec) | PENDING |
-| Discrepancies found, if any | | none found in consensus code; mining-harness/rehearsal-lab bugs found and fixed are documented in sec.5, sec.15 (onion-port collision), and sec.23.2's honest disclosure of a real-but-expected ASERT fixed-anchor difficulty-growth dynamic (not a bug, not fixed, not worked around); the legacy-vs-ASERT divergence at 227808 (sec.6.2) and both obsolete-node rejections (sec.9.1/10.1) are expected designed behavior, not discrepancies |
+| Upgrade gate statement | (Part 5 of the final-phase instructions) | PENDING |
+| Post-activation stabilization criteria | (Part 6 of the final-phase instructions) | PENDING |
+| Discrepancies found, if any | | **one real Core defect found, fixed, and re-verified: sec.26 (full-reindex AuxPoW disk-deserialization defect, commit `7942285e1175dacb54958b7cde1e4fa19630fde0`)**; mining-harness/rehearsal-lab bugs found and fixed are documented in sec.5, sec.15 (onion-port collision), and sec.23.2's honest disclosure of a real-but-expected ASERT fixed-anchor difficulty-growth dynamic (not a bug, not fixed, not worked around); the legacy-vs-ASERT divergence at 227808 (sec.6.2) and both obsolete-node rejections (sec.9.1/10.1) are expected designed behavior, not discrepancies |
 
 Note on sec.9/10: the existing `scenario_A_direct.py`/`scenario_B_auxpow.py` scripts (written earlier
 in the rehearsal, sec.7 of the pending table before this revision) mine extra continuity blocks
