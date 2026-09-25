@@ -5,22 +5,34 @@ Concise, operational record. Full narrative evidence lives in
 
 ## Source
 
-- **Release-candidate branch HEAD**: `448ad36f53031a5994bd772e8d16c114e807a040`
-  (`powhermes/bitaicoin`, branch `bitaicoin-phase1`)
+- **Release-candidate branch HEAD (pre-manifest-update)**: `0d82992ccd32d5e9ac3f87cd96e8572fe96bc355`
+  (`powhermes/bitaicoin`, branch `bitaicoin-phase1`). This is the tree that was built and validated in
+  the final clean-environment gate below. Committing this manifest update creates one further commit on
+  top; that commit's hash is the true final candidate HEAD and is recorded at the bottom of this file
+  once known.
+- **Composition of the candidate HEAD**:
+  - `c5e1c62482e910428604ee373f24b798eddd8233` -- this release-readiness manifest (initial version)
+  - `0d82992ccd32d5e9ac3f87cd96e8572fe96bc355` -- `.gitignore` hygiene fix restoring the historical
+    ignore patterns for `test/config.ini`, `test/cache/`, `test/.mypy_cache/` so that
+    `git status --porcelain` is genuinely empty (build artifacts no longer show as untracked).
 - **Reindex-fix commit included**: `7942285e1175dacb54958b7cde1e4fa19630fde0`
+  (confirmed ancestor of the candidate HEAD via `git merge-base --is-ancestor`).
+- **Functional-test REPO_ROOT/symlink fix included**: `448ad36f53031a5994bd772e8d16c114e807a040`
+  (confirmed ancestor via `git merge-base --is-ancestor`).
 - **Previous activation/AuxPoW milestone commits included**: `d077241af36023f1c6241faf93d6ea7defb81d41`
   (createauxblock/submitauxblock RPC + IBD/cooldown fix), `2e700d7ad6fe08c840d2e9b4e99ef5e89a2b34f6`
   (merge-mining reference coordinator)
-- **Working tree**: clean (no tracked-file modifications; only pre-existing untracked build artifacts
-  -- `.DS_Store`, `test/cache/`, `test/config.ini`)
+- **Working tree**: **genuinely clean** -- `git status --porcelain` produces no output at all (not
+  "clean except untracked"; the `.gitignore` hygiene commit above is what closed that gap).
 
 **Release-source requirement, stated unambiguously**: the minimum production release must contain the
 complete activation package **and** the reindex fix, as one continuous history -- not two independently
 selectable commits. **Production release source must be a descendant of the complete AuxPoW/ASERT
 activation implementation and must include reindex fix commit `7942285e1175dacb54958b7cde1e4fa19630fde0`.**
-The exact final release-candidate HEAD recorded above (`448ad36f53...`) is the concrete instance of
-that requirement as verified in this rehearsal; any later commit built on top of it, without reverting
-either the activation implementation or the reindex fix, continues to satisfy it.
+The exact final release-candidate HEAD recorded above (`0d82992ccd...`, plus the manifest-update commit
+on top of it) is the concrete instance of that requirement as verified in this rehearsal; any later
+commit built on top of it, without reverting either the activation implementation or the reindex fix,
+continues to satisfy it.
 
 ## Consensus parameters
 
@@ -52,52 +64,80 @@ either the activation implementation or the reindex fix, continues to satisfy it
 | Pruning mechanism | `feature_auxpow_prune.py` functional test **PASS**; real rehearsal chain's own physical
   pruning limitation (tiny native blocks share one blk file with the always-unprunable tip) documented,
   not a defect in the mechanism itself |
-| C++ full result | **PASS**, 811/811 test cases |
-| C++ `auxpow_tests` | **PASS**, 52/52 test cases |
+| C++ full result | **PASS**, 811/811 test cases run (816 total, 5 platform-skipped; one benign
+  `DIR_UNIT_TEST_DATA`-unset skip-warning in `script_assets_tests`, standard upstream behavior), EXIT 0.
+  Re-confirmed on the fresh post-reboot clean build. |
+| C++ `auxpow_tests` | **PASS**, 52/52 test cases (re-confirmed on the fresh clean build) |
 | Focused AuxPoW functional suite | **PASS**, all of: `feature_auxpow_createauxblock_ibd.py`,
   `feature_auxpow_rpc.py`, `feature_auxpow_rpc_disabled_chains.py`, `feature_auxpow_prune.py`,
   `feature_auxpow_reindex.py` |
 | Stock reindex / mining / block tests | **PASS**: `feature_reindex.py`, `mining_basic.py`,
   `feature_block.py` (each confirmed individually against the release-candidate HEAD) |
-| Full functional suite (`-j2`, then `-j1`) | **NOT fully green on this development machine -- see below.
-  No deterministic regression found beyond the one bug already fixed.** |
+| Full functional suite (`-j2`, post-reboot clean machine) | **PASS -- ✓ ALL PASSED**, 289 tests,
+  runtime 872 s. Every non-pass is a legitimate platform/config skip (not-on-Linux USDT/bind tests,
+  IPC/bench not compiled, previous-releases-not-available backward-compat tests, python3-zmq absent);
+  zero failures; runner EXIT 0. See "Full functional suite" below. |
 
-### Full functional suite: honest result, not overstated
+### Final clean-environment validation (build environment + binaries)
 
-Two full-suite attempts at `-j2` and one at `-j1` were run against the exact release-candidate tree.
-None completed with zero failures. Investigated per instruction, not dismissed:
+This gate was executed on a **freshly rebooted machine** specifically to obtain the authoritative,
+fully-green full-suite result that the earlier heavily-used session could not (see historical note
+below). Environment verified clean before building: no stray `bitaicoind`/`test_runner`/`bitcoind`
+processes, **zero swap in use**, ample free disk.
 
-- **One real, deterministic, 100%-reproducible bug was found and fixed** during this investigation:
+- **Toolchain**: Apple clang 21.0.0 (`clang-2100.3.34.2`), target `arm64-apple-darwin25.6.0`;
+  CMake 4.4.3; Xcode 27.0 (`27A266a`); macOS 26.6 (`25G72`); 10 cores / 16 GB RAM.
+- **Build directory**: brand-new `build-rc/` (the old, heavily-exercised `build/` tree was **not**
+  reused).
+- **Configure**: `RelWithDebInfo`; `BUILD_TESTS=ON`, `BUILD_CLI=ON`, `BUILD_DAEMON=ON`,
+  `BUILD_UTIL=ON`; `BUILD_GUI=OFF`, `BUILD_BENCH=OFF`, `ENABLE_IPC=OFF`; system `cc`/`c++`.
+- **Build command**: `cmake --build build-rc -j10` -- completed with no errors.
+- **Binary SHA-256** (the daemon/CLI are emitted as `bitaicoind`/`bitaicoin-cli`; the functional test
+  harness requires `bitcoind`/`bitcoin-cli` names, provided as symlinks to these exact binaries -- a
+  harness-path accommodation only, no source or binary altered):
+  - `bitaicoind`: `cba16419790ff2ed94ca83af0529a48838a085e3f16f615c2a45056e7de5cc85`
+  - `bitaicoin-cli`: `9f1024cc5371ad4ad9d476850994db76913079bc0090b5554d6180a7bf542c02`
+
+### Full functional suite: clean-environment result
+
+The full functional suite was run **once at `-j2`** against the exact release-candidate tree on the
+post-reboot clean machine and **passed with zero failures** (`ALL | ✓ Passed`, 289 tests, runtime
+872 s, runner EXIT 0). No `-j1` fallback was needed. Every test not marked passed is a documented
+platform/configuration skip (not-on-Linux USDT/bind interfaces, IPC/bench binaries not compiled,
+previous-release-dependent backward-compat tests, python3-zmq module absent) -- none are failures.
+
+The eight focused functional gates were additionally each run individually against this same clean
+build first and all passed: `feature_auxpow_createauxblock_ibd.py`, `feature_auxpow_rpc.py`,
+`feature_auxpow_rpc_disabled_chains.py`, `feature_auxpow_prune.py`, `feature_auxpow_reindex.py`,
+`feature_reindex.py`, `mining_basic.py`, `feature_block.py`.
+
+### Historical note: earlier heavily-used-session flakiness (now superseded)
+
+Before the reboot, full-suite attempts at `-j2`/`-j1` on the same tree did **not** complete zero-green.
+That was investigated at the time and attributed to session-accumulated machine-resource pressure, not
+a code defect:
+
+- **One real, deterministic, 100%-reproducible bug was found and fixed** during that investigation:
   `feature_auxpow_createauxblock_ibd.py` failed every time under `test_runner.py`/`ctest` (which invoke
   tests via a symlinked build-tree copy) because its `REPO_ROOT` computation used `os.path.abspath()`,
   which does not resolve symlinks. Fixed in commit `448ad36f53031a5994bd772e8d16c114e807a040`
   (`os.path.realpath()` instead) -- a test-infrastructure-only change, no consensus/RPC/serialization
-  code touched. Confirmed passing under `test_runner.py` after the fix.
-- **Every other failure observed across all three full-suite attempts, and across an earlier -j6
-  attempt during the rehearsal itself, was individually re-run in isolation and passed** -- either
-  immediately, or on one retry. The specific set of failing tests **changed every single time** (no
-  two full-suite runs failed on the same set of tests), and the same broad pattern was independently
-  reproduced on the **pre-fix** binary during the rehearsal itself (`ACTIVATION_REHEARSAL_227808.md`
-  sec.26.6), confirming this is not caused by the reindex fix or any other change in this
-  release-candidate tree.
-- The failure signature is consistently a generic transport-level error (`ConnectionResetError`, RPC
-  timeout, occasional `SIGKILL` on a test node) arising during ordinary P2P/RPC setup in tests that
-  have no relationship to AuxPoW, ASERT, BIP34, or reindex logic (wallet, mempool, generic P2P, mining
-  template tests). This is consistent with real, session-accumulated resource pressure on this
-  particular development machine (very low free memory and high open-file-descriptor counts were
-  observed directly) after an extraordinarily long, continuous test/rehearsal session, not a code
-  defect.
-- **Recommendation**: obtain one authoritative, fully-green full-suite result from a fresh environment
-  (a clean CI run, or this same machine after a full restart) before tagging a release, specifically
-  because this local machine could not produce one in its current, heavily-used state. The evidence
-  above supports that the release-candidate tree itself has no known deterministic functional
-  regression; it does not substitute for that clean confirmation.
+  code touched.
+- **Every other failure was individually re-run in isolation and passed**; the failing set changed on
+  every full-suite run (no two failed on the same tests), the same pattern was reproduced on the
+  **pre-fix** binary during the rehearsal (`ACTIVATION_REHEARSAL_227808.md` sec.26.6), and the failure
+  signature was always a generic transport-level error (`ConnectionResetError`, RPC timeout, occasional
+  `SIGKILL`) in tests unrelated to AuxPoW/ASERT/BIP34/reindex. Direct measurement showed very low free
+  memory and 11.9 GB of swap in use at the time.
+- This clean-environment gate is exactly the "authoritative, fully-green result from a fresh
+  environment" that the earlier pass recommended obtaining before tagging. It has now been obtained.
 
 ## Known non-consensus notes
 
-- High-parallel (and even single-threaded, `-j1`) functional-suite flakiness was observed on this
-  specific development machine late in an extremely long session; see above. Not relevant to the
-  release-candidate source itself.
+- Functional-suite flakiness observed late in an extremely long pre-reboot session was traced to
+  machine-resource pressure (11.9 GB swap in use), not the release-candidate source; it did **not**
+  recur in the post-reboot clean-environment gate, which passed the full suite zero-green at `-j2`. See
+  the historical note above.
 - The laboratory port/onion-service-bind collision found during the convergence/reorg rehearsal phase
   (`ACTIVATION_REHEARSAL_227808.md` sec.15) was rehearsal infrastructure only (a port-numbering choice
   in throwaway test scripts), not a BitAIcoin or Bitcoin Core defect.
@@ -108,12 +148,29 @@ None completed with zero failures. Investigated per instruction, not dismissed:
 ## Consensus freeze
 
 **Consensus implementation is frozen following completion of the 227808/227931 activation rehearsal.
-Any subsequent consensus-affecting change requires a new review and targeted activation rehearsal
+Any subsequent consensus-affecting change requires explicit review and a targeted activation rehearsal
 before production.**
 
 This does **not** mean ordinary bug fixes, UI/RPC changes, or release engineering are forbidden. It
 means no casual modification of: activation height, chain ID, ASERT, direct/AuxPoW coexistence, block
 serialization, PoW validation, BIP34 semantics, replay rules, or the fork anchor.
+
+## Release-gate confirmations (final)
+
+- **Reindex fix included**: yes -- `7942285e1175dacb54958b7cde1e4fa19630fde0` is an ancestor of the
+  candidate HEAD (verified by `git merge-base --is-ancestor`).
+- **Working tree clean**: yes -- `git status --porcelain` produces no output.
+- **Activation rehearsal complete**: yes -- full 227808/227931 rehearsal COMPLETE and consensus-frozen
+  (`docs/ACTIVATION_REHEARSAL_227808.md`).
+- **Consensus freeze active**: yes -- see "Consensus freeze" above.
+- **C++ unit gate**: 811/811 run PASS, `auxpow_tests` 52/52, EXIT 0, on the fresh clean build.
+- **Full functional suite**: ✓ ALL PASSED at `-j2` on the post-reboot clean machine (289 tests, 872 s,
+  zero failures).
+- **Final candidate HEAD**: the commit that lands this manifest update **is** the final release
+  candidate. Because a commit cannot embed its own hash, the authoritative value is whatever
+  `git rev-parse HEAD` / `git log -1 --format=%H -- docs/RELEASE_READINESS_227808.md` reports for this
+  commit on branch `bitaicoin-phase1`. It is a direct child of `0d82992ccd32d5e9ac3f87cd96e8572fe96bc355`
+  and, like its parent, includes the reindex fix and the full activation implementation.
 
 ## Explicitly not done as part of this manifest
 
