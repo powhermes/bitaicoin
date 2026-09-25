@@ -67,7 +67,14 @@ import sys
 import tempfile
 import time
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+# NOTE: realpath, not abspath -- test_runner.py/ctest invoke this file via a
+# symlinked copy under build/test/functional/; abspath does not resolve
+# symlinks, so it computed REPO_ROOT one directory too high (landing on
+# build/ itself) and COORDINATOR_DIR below silently pointed nowhere,
+# producing a deterministic "No module named 'coordinator'" failure under
+# test_runner.py specifically (never when this file is run directly from
+# the source tree, where __file__ already is the real path).
 BIN_DIR = os.path.join(REPO_ROOT, "build", "bin")
 COORDINATOR_DIR = os.path.join(REPO_ROOT, "contrib", "merge_mining_coordinator")
 sys.path.insert(0, COORDINATOR_DIR)
