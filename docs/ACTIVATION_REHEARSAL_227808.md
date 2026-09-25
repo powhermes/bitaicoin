@@ -1005,12 +1005,61 @@ Dedicated section, kept separate from the 227808 sections above per instruction.
 *sources*, Scenario A/B evidence, and all sec.14-21 convergence/reorg evidence were never reused or
 mutated.
 
+### 23.0 Audit: `BIP34Hash` is a separate, narrow BIP30-skip optimization gate, NOT part of BIP34's own enforcement
+
+**Correction to an earlier, misleading statement in this document** (this section previously said
+`consensus.BIP34Hash` being set to the real historical Bitcoin mainnet hash at height 227931 was
+"consistent with this chain inheriting real Bitcoin history" -- true only in the narrow sense that the
+*value itself* was copied from mainnet, but the surrounding claim implied an active, meaningful
+consensus relationship that does not exist for BitAIcoin's own forked history past height 225429; this
+rehearsal's own real BAIC block 227931,
+`000000000dcfc56475a3d3767c8ae0efd361db9239181c4d8988c25e8833e4e3`, is obviously BitAIcoin-native and
+will never equal that hardcoded mainnet value, which is precisely what this audit investigates).
+
+**Method**: searched the entire current source tree (`grep -rn "BIP34Hash" src/`) for every
+read/reference, distinguishing parameter assignment from runtime use:
+
+```
+src/consensus/params.h:96:      uint256 BIP34Hash;                          <- declaration only
+src/kernel/chainparams.cpp:91,237,467,574,726,815:  consensus.BIP34Hash = ...   <- assignment only, one per chain type
+src/validation.cpp:2497:        fEnforceBIP30 = fEnforceBIP30 && (!pindexBIP34height ||
+                                     !(pindexBIP34height->GetBlockHash() == params.GetConsensus().BIP34Hash));
+```
+
+**Exactly one runtime read exists in the entire tree**, inside `ConnectBlock()`'s BIP30 (duplicate-
+coinbase) handling, read directly (lines 2480-2500 with their surrounding comments):
+```cpp
+CBlockIndex* pindexBIP34height = pindex->pprev->GetAncestor(params.GetConsensus().BIP34Height);
+//Only continue to enforce if we're below BIP34 activation height or the block hash at that height doesn't correspond.
+fEnforceBIP30 = fEnforceBIP30 && (!pindexBIP34height || !(pindexBIP34height->GetBlockHash() == params.GetConsensus().BIP34Hash));
+```
+This is real Bitcoin Core's own historical BIP30/BIP34 interaction, unmodified: on real mainnet, once
+the chain is confirmed (by hash match at the known BIP34 height) to be the real chain that already
+activated BIP34, the node may safely **stop** enforcing the older, more expensive BIP30 duplicate-
+coinbase check (BIP34's own unique-height-per-coinbase property makes a new BIP30 violation
+effectively impossible past that point). **It is not part of BIP34's own height-encoding enforcement**
+(`bad-cb-height`), which is governed entirely and only by `BIP34Height`/`DEPLOYMENT_HEIGHTINCB`
+(sec.23.1) -- a completely separate code path that never reads `BIP34Hash` at all.
+
+**Result, precisely**: `BIP34Hash` is not unused legacy metadata (it is read, every block, in
+`ConnectBlock`), but for BitAIcoin it is **permanently inert**: since `pindexBIP34height`'s real hash at
+BitAIcoin's own 227931 will never equal the hardcoded real-mainnet value, the condition
+`!(... == BIP34Hash)` is always true, so `fEnforceBIP30` is **never relaxed** by this mechanism --
+BitAIcoin unconditionally keeps performing the (safe, conservative, slightly more thorough) BIP30
+duplicate-coinbase check forever, past 227931, rather than ever taking the optimization real mainnet
+takes at the equivalent point. **This is not a validation gap, not an under-enforcement, and not a
+security defect** -- the stale value only ever prevents an optimization from firing; it can never cause
+an invalid block to be accepted or a valid one rejected. No startup, checkpoint, assumeutxo, or index
+logic references `BIP34Hash` anywhere in the tree (confirmed by the same search). **No Core change is
+made or recommended** -- per instruction, this is reported, not fixed, since it has no effect on
+BitAIcoin's actual consensus correctness, only on a now-permanently-dormant micro-optimization.
+
 ### 23.1 Real BIP34Height parameter (read from source, not docs/comments)
 
 Confirmed directly in `src/kernel/chainparams.cpp` (`CBitAIcoinParams`): `consensus.BIP34Height =
-227931` (paired with `consensus.BIP34Hash` set to the real historical Bitcoin mainnet hash at that
-height, consistent with this chain inheriting real Bitcoin history). Enforcement mechanism traced
-through `src/validation.cpp` (`ContextualCheckBlock`, the `bad-cb-height` check) ->
+227931`, entirely independent of `BIP34Hash` (sec.23.0 above -- a separate mechanism BIP34's own
+enforcement never reads). Enforcement mechanism traced through `src/validation.cpp`
+(`ContextualCheckBlock`, the `bad-cb-height` check) ->
 `DeploymentActiveAfter(pindexPrev, ..., DEPLOYMENT_HEIGHTINCB)` -> `src/consensus/params.h`
 (`DeploymentHeight(DEPLOYMENT_HEIGHTINCB) == BIP34Height`) -> `src/deploymentstatus.h`:
 ```
@@ -1048,19 +1097,26 @@ unbroken `previousblockhash` linkage, final tip exactly `getblockhash(227928)` -
 
 **Real finding, honestly disclosed (not a bug, not fixed, not worked around)**: because this gap was
 mined far faster than its nominal 600s/block schedule, and BitAIcoin's ASERT anchor is permanently
-fixed at height 227807 (heightDiff grows without bound from that one fixed point, never rolling
-forward), the cumulative schedule deviation compounds for as long as blocks keep arriving faster than
-600s/block relative to that fixed anchor. By height 227928 this had already pushed bits from the
-initial `1d0fb6d7` down to `1d063a0f` -- meaningfully harder -- purely as a real, correct consequence of
-mining efficiently, not any parameter change. This is disclosed here because it directly affected how
-long later real-PoW steps in this same phase took (sec.23.5's wrong-height solve alone took several
-minutes of real 8-worker compute at the resulting difficulty), and because it is a genuine, worth-
-recording property of this specific ASERT variant's fixed-anchor design: a network that mines
-substantially faster than schedule for an extended period will see monotonically increasing difficulty
-relative to that fixed anchor for as long as the deviation persists, with no rolling-window reset. This
-is **not** flagged as a discrepancy requiring a Core change -- it is the direct, self-consistent
-consequence of the already-frozen, already-reviewed ASERT design being exercised at a real fast-mining
-rate for the first time in this rehearsal, and no code was touched to produce or work around it.
+fixed at height 227807 (never rolling forward to a more recent block), the target moved substantially
+harder by height 227928. **Precise mechanism** (corrected wording from an earlier draft of this
+section, which described this as "compounding without bound" -- technically imprecise): ASERT's
+exponent term is `(timeDiff - spacing*(heightDiff+1)) / halfLife`, where both `timeDiff` and
+`heightDiff` are measured against the one fixed 227807 reference point. **Sustained faster-than-
+schedule block production accumulates negative schedule displacement relative to the fixed reference
+anchor and therefore progressively hardens the target; sustained slower production moves it in the
+opposite direction.** The implementation remains bounded by its existing target clamps at every step
+(`contrib/asert_reference.py`/`src/pow.cpp`'s `ComputeASERTTarget`: floor of target `1`, easy-side
+ceiling `powLimit` -- both already exercised and confirmed in sec.6.2/9's real data). By height 227928
+this had pushed bits from the initial `1d0fb6d7` down to `1d063a0f` -- meaningfully harder -- purely as
+a real, correct consequence of mining efficiently relative to that fixed anchor, not any parameter
+change. Disclosed here because it directly affected how long later real-PoW steps in this same phase
+took (sec.23.5's wrong-height solve took several minutes of real 8-worker compute at the resulting
+difficulty). **This fixed-reference-anchor behavior matches the intended, already-frozen, already-
+reviewed ASERT design exactly** (the anchor was deliberately fixed at the pre-activation/post-activation
+boundary block, sec.6.2/9, specifically so the first post-activation retarget has a well-defined,
+unambiguous, height-independent reference point -- this rehearsal is the first time that design has
+been exercised at a real fast-mining rate over an extended run, not a newly discovered design defect).
+No code was touched to produce or work around this; no Core change is necessary or recommended.
 
 **Item 6 snapshot**: cleanly stopped, snapshotted (`cp -Rc`) as `golden-227928-pre-bip34/` (three
 blocks before real BIP34Height=227931), documented as disposable rehearsal infrastructure only (never
