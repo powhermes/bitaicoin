@@ -270,6 +270,8 @@ target_link_libraries(bitcoin-qt
 )
 
 import_plugins(bitcoin-qt)
+# BitAIcoin: user-facing GUI renamed to bitaicoin-qt (OUTPUT_NAME only).
+set_target_properties(bitcoin-qt PROPERTIES OUTPUT_NAME "bitaicoin-qt")
 install_binary_component(bitcoin-qt HAS_MANPAGE)
 if(WIN32)
   set_target_properties(bitcoin-qt PROPERTIES WIN32_EXECUTABLE TRUE)

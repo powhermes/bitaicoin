@@ -20,6 +20,7 @@ add_executable(test_bitcoin
   bech32_tests.cpp
   bip32_tests.cpp
   bip324_tests.cpp
+  bitaicoin_branding_tests.cpp
   bitaicoin_forkid_tests.cpp
   blockchain_tests.cpp
   blockencodings_tests.cpp

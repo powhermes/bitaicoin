@@ -169,6 +169,8 @@ if(ENABLE_WALLET)
       bitcoin_util
       Boost::headers
     )
+    # BitAIcoin: user-facing tool renamed to bitaicoin-wallet (OUTPUT_NAME only).
+    set_target_properties(bitcoin-wallet PROPERTIES OUTPUT_NAME "bitaicoin-wallet")
     install_binary_component(bitcoin-wallet HAS_MANPAGE)
   endif()
 endif()
@@ -303,6 +305,9 @@ if(BUILD_BITCOIN_BIN)
   add_windows_resources(bitcoin bitcoin-res.rc)
   add_windows_application_manifest(bitcoin)
   target_link_libraries(bitcoin core_interface bitcoin_common bitcoin_util)
+  # BitAIcoin: user-facing wrapper renamed to bitaicoin (OUTPUT_NAME only; the
+  # CMake target and its dispatch table in bitcoin.cpp are updated to match).
+  set_target_properties(bitcoin PROPERTIES OUTPUT_NAME "bitaicoin")
   install_binary_component(bitcoin HAS_MANPAGE)
 endif()
 
@@ -382,6 +387,8 @@ if(BUILD_TX)
     bitcoin_util
     univalue
   )
+  # BitAIcoin: user-facing tool renamed to bitaicoin-tx (OUTPUT_NAME only).
+  set_target_properties(bitcoin-tx PROPERTIES OUTPUT_NAME "bitaicoin-tx")
   install_binary_component(bitcoin-tx HAS_MANPAGE)
 endif()
 
@@ -395,6 +402,8 @@ if(BUILD_UTIL)
     bitcoin_common
     bitcoin_util
   )
+  # BitAIcoin: user-facing tool renamed to bitaicoin-util (OUTPUT_NAME only).
+  set_target_properties(bitcoin-util PROPERTIES OUTPUT_NAME "bitaicoin-util")
   install_binary_component(bitcoin-util HAS_MANPAGE)
 endif()
 
