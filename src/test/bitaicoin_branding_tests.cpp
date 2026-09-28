@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <clientversion.h>
+#include <policy/feerate.h>
 #include <test/util/setup_common.h>
 
 #include <string>
@@ -56,6 +57,14 @@ BOOST_AUTO_TEST_CASE(product_name_is_not_bitcoin)
     BOOST_CHECK(name.find("Bitcoin Core") == std::string::npos);
     BOOST_CHECK(name.find("bitcoin-") == std::string::npos);
     BOOST_CHECK(name.find("bitcoin") == std::string::npos); // case-sensitive: excludes lowercase upstream name
+}
+
+BOOST_AUTO_TEST_CASE(currency_unit_is_baic)
+{
+    // Daemon/CLI/RPC display unit label. Numeric amounts and the smallest-unit
+    // terminology are unchanged; only the visible ticker label is BitAIcoin's.
+    BOOST_CHECK_EQUAL(CURRENCY_UNIT, std::string("BAIC"));
+    BOOST_CHECK_EQUAL(CURRENCY_ATOM, std::string("sat"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
