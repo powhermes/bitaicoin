@@ -45,4 +45,17 @@ BOOST_AUTO_TEST_CASE(p2p_subversion_is_bitaicoin)
     BOOST_CHECK(subversion.find("Satoshi") == std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(product_name_is_not_bitcoin)
+{
+    // CLIENT_NAME is the product identity embedded in every tool's --version
+    // line (e.g. bitcoin-wallet/-tx/-util build their version string as
+    // CLIENT_NAME + " <role> utility version ..."). Guard that the product name
+    // is neither the upstream "Bitcoin Core" nor any "bitcoin-" form, so no
+    // user-visible version line can describe the product as bitcoin-*.
+    const std::string name{CLIENT_NAME};
+    BOOST_CHECK(name.find("Bitcoin Core") == std::string::npos);
+    BOOST_CHECK(name.find("bitcoin-") == std::string::npos);
+    BOOST_CHECK(name.find("bitcoin") == std::string::npos); // case-sensitive: excludes lowercase upstream name
+}
+
 BOOST_AUTO_TEST_SUITE_END()
