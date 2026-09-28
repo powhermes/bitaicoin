@@ -53,7 +53,7 @@ set(CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
 project(BitcoinCore
   VERSION ${CLIENT_VERSION_MAJOR}.${CLIENT_VERSION_MINOR}.${CLIENT_VERSION_BUILD}
   DESCRIPTION "BitAIcoin client software"
-  HOMEPAGE_URL "https://github.com/powhermes/bitaicoin"
+  HOMEPAGE_URL "https://bitaicoin.com"
   LANGUAGES NONE
 )
 
@@ -64,7 +64,7 @@ endif()
 
 set(COPYRIGHT_HOLDERS "The %s developers")
 set(COPYRIGHT_HOLDERS_FINAL "The ${CLIENT_NAME} developers")
-set(CLIENT_BUGREPORT "https://github.com/powhermes/bitaicoin/issues")
+set(CLIENT_BUGREPORT "https://bitaicoin.com/support/")
 
 #=============================
 # Language setup
