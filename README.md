@@ -36,6 +36,14 @@ BitAIcoin-specific commit on top of it.
 
 Full design rationale: `docs/ARCHITECTURE.md`.
 
+## Branding & ecosystem identity
+
+**BitAIcoin** is the network, coin, software, and technical identity.
+**Saitoshi** is the symbolic ecosystem identity — a nod to Satoshi, reimagined for
+BitAIcoin. The circular orange-and-white mark is the primary visual identity. See
+[`docs/BRANDING.md`](docs/BRANDING.md) for the full identity model, asset list, and
+how the shipped icons are generated.
+
 ## Documentation
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design overview and rationale
@@ -47,6 +55,7 @@ Full design rationale: `docs/ARCHITECTURE.md`.
 - [`docs/TESTNET_RUNBOOK.md`](docs/TESTNET_RUNBOOK.md) — exact steps to bootstrap history and run a private multi-node network
 - [`PHASE1_REPORT.md`](PHASE1_REPORT.md) — what was built, tested, and verified in Phase 1, and current known limitations
 - [`UPSTREAM.md`](UPSTREAM.md) — upstream repo/tag/commit and this fork's own commit history
+- [`docs/BRANDING.md`](docs/BRANDING.md) — BitAIcoin / Saitoshi identity model and visual assets
 
 ## Building
 

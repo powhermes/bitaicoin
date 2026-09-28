@@ -1,0 +1,20 @@
+# BitAIcoin branding asset checksums (SHA-256).
+# Master and all derivatives; see docs/BRANDING.md for generation.
+# master:
+dff06fb8fec7175566e4096439e04e280154df43531f79d52d5a8ee087f410e6  doc/bitaicoin_logo.png
+# doc mark + shipped application/desktop icons (BitAIcoin mark):
+dff06fb8fec7175566e4096439e04e280154df43531f79d52d5a8ee087f410e6  doc/bitaicoin_icon.png
+c27fa998f9db2ef051e6ed5107e7ff0558eb18e4fd15cdd93dd90181c7e3c6c8  src/qt/res/icons/bitcoin.png
+81e89eda206ffd49d651eb4f97e36670083704205a0794dfdc01f96b8dc25210  src/qt/res/icons/bitcoin.ico
+4cf7004336c1238fc309aa5fc310fa023f1821f24085bf436268c50e14de77fd  src/qt/res/icons/bitcoin.icns
+81e89eda206ffd49d651eb4f97e36670083704205a0794dfdc01f96b8dc25210  share/pixmaps/bitcoin.ico
+363fef9bfe82de3201d84dd63c23f780d97d03c30d80f99090f637d3d9df6810  share/pixmaps/bitcoin16.png
+8f3f98493d182ba693994f54245b8b70b6c62132e5badbc9319e7e93de925822  share/pixmaps/bitcoin32.png
+9976502e357c9cdd134729209945552bf148242ab814cd71441ae92cd495114a  share/pixmaps/bitcoin64.png
+e204a664e5ad9930a6796ceebefa3c7ffd05171e03e75b0fa2a7df1a81c531c2  share/pixmaps/bitcoin128.png
+85b1a86c432182b9af7b36ae32c009f683d797b8fc612e3473eee726d116af1c  share/pixmaps/bitcoin256.png
+e791bf559f5f3e8401ef6e12405d3832c4d476e5d59014b5f881dfaf01ee8707  share/pixmaps/bitcoin16.xpm
+5dfc0b4e536ed3ecd74cd72f33df5f357219e8127093985a23706b75a1ec48a5  share/pixmaps/bitcoin32.xpm
+7b8fa04d429a1936e2568f77e564ef7757cc59fcff574d57606c6135fbbd6331  share/pixmaps/bitcoin64.xpm
+2baab4c309897f7993afac5a87f9340daeba87447ba4aa39a8ba6407e866b412  share/pixmaps/bitcoin128.xpm
+64e3919f240ad5260877ce964cc0a196c73bacafc4332f9190b5a434e01a6475  share/pixmaps/bitcoin256.xpm
