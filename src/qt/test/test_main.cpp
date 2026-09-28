@@ -11,6 +11,7 @@
 #include <qt/test/apptests.h>
 #include <qt/test/optiontests.h>
 #include <qt/test/rpcnestedtests.h>
+#include <qt/test/baicbrandingtests.h>
 #include <qt/test/uritests.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
@@ -83,6 +84,12 @@ int main(int argc, char* argv[])
 
         OptionTests options_tests(app.node());
         num_test_failures += QTest::qExec(&options_tests);
+
+        BAICBrandingTests baic_branding_tests;
+
+
+        num_test_failures += QTest::qExec(&baic_branding_tests);
+
 
         URITests test1;
         num_test_failures += QTest::qExec(&test1);
