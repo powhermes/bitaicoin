@@ -757,19 +757,21 @@ bool HasTestOption(const ArgsManager& args, const std::string& test_option)
 
 fs::path GetDefaultDataDir()
 {
+    // BitAIcoin uses its own data directory so it never shares (or writes into)
+    // a Bitcoin Core datadir on the same machine.
     // Windows:
-    //   old: C:\Users\Username\AppData\Roaming\Bitcoin
-    //   new: C:\Users\Username\AppData\Local\Bitcoin
-    // macOS: ~/Library/Application Support/Bitcoin
-    // Unix-like: ~/.bitcoin
+    //   old: C:\Users\Username\AppData\Roaming\BitAIcoin
+    //   new: C:\Users\Username\AppData\Local\BitAIcoin
+    // macOS: ~/Library/Application Support/BitAIcoin
+    // Unix-like: ~/.bitaicoin
 #ifdef WIN32
     // Windows
     // Check for existence of datadir in old location and keep it there
-    fs::path legacy_path = GetSpecialFolderPath(CSIDL_APPDATA) / "Bitcoin";
+    fs::path legacy_path = GetSpecialFolderPath(CSIDL_APPDATA) / "BitAIcoin";
     if (fs::exists(legacy_path)) return legacy_path;
 
     // Otherwise, fresh installs can start in the new, "proper" location
-    return GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / "Bitcoin";
+    return GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / "BitAIcoin";
 #else
     fs::path pathRet;
     char* pszHome = getenv("HOME");
@@ -779,10 +781,10 @@ fs::path GetDefaultDataDir()
         pathRet = fs::path(pszHome);
 #ifdef __APPLE__
     // macOS
-    return pathRet / "Library/Application Support/Bitcoin";
+    return pathRet / "Library/Application Support/BitAIcoin";
 #else
     // Unix-like
-    return pathRet / ".bitcoin";
+    return pathRet / ".bitaicoin";
 #endif
 #endif
 }
@@ -849,7 +851,8 @@ std::variant<ChainType, std::string> ArgsManager::GetChainArg() const
     if (fSigNet) return ChainType::SIGNET;
     if (fTestNet) return ChainType::TESTNET;
     if (fTestNet4) return ChainType::TESTNET4;
-    return ChainType::MAIN;
+    // BitAIcoin: with no chain flag, run BitAIcoin's own chain (not Bitcoin mainnet).
+    return ChainType::BITAICOIN;
 }
 
 bool ArgsManager::UseDefaultSection(const std::string& arg) const

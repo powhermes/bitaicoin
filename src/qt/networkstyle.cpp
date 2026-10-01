@@ -18,6 +18,10 @@ static const struct {
     const int iconColorSaturationReduction;
 } network_styles[] = {
     {ChainType::MAIN, QAPP_APP_NAME_DEFAULT, 0, 0},
+    // BitAIcoin's own settlement chain — styled like the primary network so the
+    // GUI can open on -chain=bitaicoin (without this the Qt app asserts on a null
+    // NetworkStyle and quits: bitcoin.cpp GuiMain).
+    {ChainType::BITAICOIN, QAPP_APP_NAME_DEFAULT, 0, 0},
     {ChainType::TESTNET, QAPP_APP_NAME_TESTNET, 70, 30},
     {ChainType::TESTNET4, QAPP_APP_NAME_TESTNET4, 70, 30},
     {ChainType::SIGNET, QAPP_APP_NAME_SIGNET, 35, 15},

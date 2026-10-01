@@ -423,10 +423,11 @@ public:
         assert(consensus.hashGenesisBlock == uint256{"000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"});
         assert(genesis.hashMerkleRoot == uint256{"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"});
 
-        // No public seeds for a private Phase 1 lab network (constraint: no accidental or
-        // premature public connectivity). Private nodes connect explicitly via -connect/-addnode.
+        // Public peer discovery: a DNS seed so a fresh node auto-connects with no
+        // manual -addnode. seed.bitaicoin.com resolves (Cloudflare) to the public node(s).
         vFixedSeeds.clear();
         vSeeds.clear();
+        vSeeds.emplace_back("seed.bitaicoin.com.");
 
         fDefaultConsistencyChecks = false;
         m_is_mockable_chain = false;

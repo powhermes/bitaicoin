@@ -658,10 +658,10 @@ BOOST_AUTO_TEST_CASE(util_GetChainTypeString)
     std::string error;
 
     BOOST_CHECK(test_args.ParseParameters(0, argv_testnet4, error));
-    BOOST_CHECK_EQUAL(test_args.GetChainTypeString(), "main");
+    BOOST_CHECK_EQUAL(test_args.GetChainTypeString(), "bitaicoin");
 
     BOOST_CHECK(test_args.ParseParameters(0, argv_testnet4, error));
-    BOOST_CHECK_EQUAL(test_args.GetChainTypeString(), "main");
+    BOOST_CHECK_EQUAL(test_args.GetChainTypeString(), "bitaicoin");
 
     BOOST_CHECK(test_args.ParseParameters(2, argv_testnet4, error));
     BOOST_CHECK_EQUAL(test_args.GetChainTypeString(), "testnet4");
@@ -1019,7 +1019,7 @@ BOOST_FIXTURE_TEST_CASE(util_ChainMerge, ChainMergeTestingSetup)
     // Results file is formatted like:
     //
     //   <input> || <output>
-    BOOST_CHECK_EQUAL(out_sha_hex, "c0e33aab0c74e040ddcee9edad59e8148d8e1cacb3cccd9ea1a1f485cb6bad21");
+    BOOST_CHECK_EQUAL(out_sha_hex, "7df7ecb1293a292c52ea195196ab50a49b79edb83366a0d8ccf5d486e7b5f73b");
 }
 
 BOOST_AUTO_TEST_CASE(util_ReadWriteSettings)
