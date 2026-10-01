@@ -552,6 +552,10 @@ def write_config(config_path, *, n, chain, extra_config="", disable_autoconnect=
     with open(config_path, 'w') as f:
         if chain_name_conf_arg:
             f.write("{}=1\n".format(chain_name_conf_arg))
+        else:
+            # BitAIcoin: with no chain flag the node runs the bitaicoin chain, so "" (Bitcoin
+            # main, as upstream tests use it) must be selected explicitly.
+            f.write("chain=main\n")
         if chain_name_conf_section:
             f.write("[{}]\n".format(chain_name_conf_section))
         f.write("port=" + str(p2p_port(n)) + "\n")

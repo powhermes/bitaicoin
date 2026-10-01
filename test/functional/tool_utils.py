@@ -42,10 +42,13 @@ class ToolUtils(BitcoinTestFramework):
         are not as expected. Error is caught by bctester() and reported.
         """
         # Get the exec names and arguments
+        # BitAIcoin: the tools default to the bitaicoin chain; these vectors are upstream
+        # Bitcoin-mainnet fixtures (address encodings etc.), so select main explicitly.
+        chain_args = ["-chain=main"]
         if testObj["exec"] == "./bitcoin-util":
-            execrun = self.bins.util_argv() + testObj["args"]
+            execrun = self.bins.util_argv() + chain_args + testObj["args"]
         elif testObj["exec"] == "./bitcoin-tx":
-            execrun = self.bins.tx_argv() + testObj["args"]
+            execrun = self.bins.tx_argv() + chain_args + testObj["args"]
 
         # Read the input data (if there is any)
         inputData = None
