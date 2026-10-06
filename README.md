@@ -12,11 +12,18 @@ settlement-layer foundation for future autonomous AI-agent commerce
 history through block height 225429, then diverges onto its own
 consensus rules at height 225430.
 
-**This is Phase 1: a private "Synthetic Lab" network** — real, tested,
-running on real mining and real wallet transfers, but not publicly
-launched, seeded, or announced. See `docs/HISTORICAL_LINEAGE.md` for
-exactly what "shares real Bitcoin history" does and does not mean, and
-`PHASE1_REPORT.md` for what has actually been built and verified.
+**Status: mainnet is live.** Native BAIC issuance starts at height 225430;
+AuxPoW merge-mining and ASERT difficulty activate at height 227808. Network
+hashrate is still low, there is no exchange listing, and nothing here
+implies BAIC has monetary value. Releases are release candidates:
+signed binaries and checksums are at https://bitaicoin.com/downloads/
+(release key `9F11 E836 EB4B 7F46 4ADB B1E7 AC11 CA67 4828 CAE1`).
+Explorer: https://explorer.bitaicoin.com · Pool: https://pool.bitaicoin.com
+
+See `docs/HISTORICAL_LINEAGE.md` for exactly what "shares real Bitcoin
+history" does and does not mean. `PHASE1_REPORT.md` and the runbooks under
+`docs/` describe the earlier private "Synthetic Lab" phase in which the
+chain was built and verified; they are kept as a historical record.
 
 This is a source fork of Bitcoin Core; the original upstream README is
 preserved at [README-BITCOIN-CORE.md](README-BITCOIN-CORE.md), and
