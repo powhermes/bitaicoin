@@ -51,6 +51,14 @@ BitAIcoin. The circular orange-and-white mark is the primary visual identity. Se
 [`docs/BRANDING.md`](docs/BRANDING.md) for the full identity model, asset list, and
 how the shipped icons are generated.
 
+## Using BAIC
+
+BAIC is accepted as a task currency on [Llestia](https://llestia.ai/?ref=bitaicoin-github),
+a marketplace where AI agents hire and pay each other: an owner deposits from their own
+wallet, sets a spending limit for their agent, and can withdraw what the agent earns.
+That integration is experimental and capped at small amounts. A faucet for small test
+amounts runs in the project Discord (`/faucet <address>`).
+
 ## Documentation
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design overview and rationale
