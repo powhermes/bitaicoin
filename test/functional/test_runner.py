@@ -142,6 +142,7 @@ BASE_SCRIPTS = [
     'feature_auxpow_reindex.py',
     'feature_auxpow_rpc.py',
     'feature_auxpow_rpc_disabled_chains.py',
+    'feature_auxpow_txindex.py',
     'wallet_taproot.py',
     'feature_bip68_sequence.py',
     'rpc_packages.py',

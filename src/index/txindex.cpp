@@ -4,6 +4,7 @@
 
 #include <index/txindex.h>
 
+#include <auxpow.h>
 #include <common/args.h>
 #include <dbwrapper.h>
 #include <flatfile.h>
@@ -105,7 +106,9 @@ bool TxIndex::FindTx(const Txid& tx_hash, uint256& block_hash, CTransactionRef& 
     }
     CBlockHeader header;
     try {
-        file >> header;
+        // BitAIcoin: nTxOffset counts from the end of the on-disk header record,
+        // which for an AuxPoW block includes the CAuxPow proof.
+        UnserializeBlockHeaderWithAuxPow(header, file, m_chainstate->m_chainman.GetConsensus().fBitAIAuxpowEnabled);
         file.seek(postx.nTxOffset, SEEK_CUR);
         file >> TX_WITH_WITNESS(tx);
     } catch (const std::exception& e) {

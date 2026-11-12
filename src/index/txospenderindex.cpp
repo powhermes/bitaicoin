@@ -4,6 +4,7 @@
 
 #include <index/txospenderindex.h>
 
+#include <auxpow.h>
 #include <common/args.h>
 #include <crypto/siphash.h>
 #include <dbwrapper.h>
@@ -148,7 +149,9 @@ util::Expected<TxoSpender, std::string> TxoSpenderIndex::ReadTransaction(const C
     CBlockHeader header;
     TxoSpender spender;
     try {
-        file >> header;
+        // BitAIcoin: nTxOffset counts from the end of the on-disk header record,
+        // which for an AuxPoW block includes the CAuxPow proof.
+        UnserializeBlockHeaderWithAuxPow(header, file, m_chainstate->m_chainman.GetConsensus().fBitAIAuxpowEnabled);
         file.seek(tx_pos.nTxOffset, SEEK_CUR);
         file >> TX_WITH_WITNESS(spender.tx);
         spender.block_hash = header.GetHash();
